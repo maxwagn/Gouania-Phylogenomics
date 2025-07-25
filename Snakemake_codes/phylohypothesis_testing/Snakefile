@@ -1,0 +1,147 @@
+
+#snakemake -p --profile qsub_hs_test --keep-going --immediate-submit --use-conda
+
+CONSTRAINED = ["constr1","constr2","constr3","constr4", "constr5"]
+
+rule all:
+    input:
+        "results/concordance_factors/concord.checkpoint"
+        #"results/likelihoodMapping/likelihood_mapping.checkpoint"
+        #"results/hypothesis_tests/deltaGLS_gouania.tsv"
+        #"results/hypothesis_tests/gouania_phylo_tests.sitelh"
+
+
+rule calculate_constrained_trees:
+    input:
+        aln = "phylogeny-0/iqtree/mafft-trimal/concat.nex", # obtained from phylociraptor run
+        constree = "constrained_trees/gouania.{constr}.tre"
+    output:
+        "results/concat_trees/{constr}/concat_{constr}.treefile"
+    threads: 8
+    conda: "iqtree.yml"
+    resources:
+        walltime=48,
+        mem_gb=80
+    params:
+        wd = os.getcwd(),
+        prefix = "results/concat_trees/{constr}/concat_{constr}",
+        bootst = 1000
+    shell:
+        """
+        iqtree -p {params.wd}/{input.aln} -g {params.wd}/{input.constree} --prefix {params.wd}/{params.prefix} -bb {params.bootst} -nt AUTO -ntmax {threads} -redo
+        """
+
+rule calculate_tree_stats:
+    input:
+        algn = "phylogeny-0/iqtree/mafft-trimal/concat.best_model.nex",
+        unconstr = "phylogeny-0/iqtree/mafft-trimal/concat.treefile",
+        constrstrees = expand("results/concat_trees/{constr}/concat_{constr}.treefile", constr = CONSTRAINED)
+    output:
+        test_report = "results/hypothesis_tests/gouania_phylo_tests.iqtree",
+        site_lh = "results/hypothesis_tests/gouania_phylo_tests.sitelh"
+    conda: "iqtree.yml"
+    threads: 16
+    resources:
+        walltime=48,
+        mem_gb=250
+    params:
+        wd = os.getcwd(),
+        prefix = "results/hypothesis_tests/gouania_phylo_tests",
+        zb = 10000
+    shell:
+        """
+        cat {input.unconstr} {input.constrstrees} > results/trees_to_test.treels
+        iqtree -p {params.wd}/{input.algn} -nt AUTO -ntmax {threads} -z {params.wd}/results/trees_to_test.treels -n 0 -zb {params.zb} -zw -au -wsl --prefix {params.wd}/{params.prefix} -redo
+        """
+
+
+rule extact_deltaGLS:
+    input:
+        BUSCO_table = "phylogeny-0/concatenate/mafft-trimal/statistics.txt",
+        #BUSCO_table = "results/BUSCO_Partitions_anabantoid_concat.tsv",
+        siteLHs = "results/hypothesis_tests/gouania_phylo_tests.sitelh"
+    output:
+        "results/hypothesis_tests/deltaGLS_gouania.tsv"
+    run:
+        ### get BUSCO sets into dictionary
+        BUSCO_sets = dict()
+        with open(str(input.BUSCO_table), "r") as iqtree:
+            for line in iqtree:
+                if line.startswith("alignment"):
+                    pass
+                else:    
+                    line = line.rstrip().split("\t")
+                    BUSCO_sets[str(line[0].split("_")[0])]=[int(line[1]),int(line[2])]
+                
+        #print(BUSCO_sets)
+
+        ### calculate deltaGLS
+        header = "BUSCO\tlogLTree1\tlogLTree2\tlogLTree3\tlogLTree4\tlogLTree5\tlogLTree6\tdeltaLTree1\tdeltaLTree2\tdeltaLTree3\tdeltaLTree4\tdeltaLTree5\tdeltaLTree6\n"
+
+
+        with open(str(output), "w") as outfile:
+            outfile.write(header)
+            for k, v in BUSCO_sets.items():
+                GLSvals = []
+                deltaGLSvals = []
+                with open(str(input.siteLHs), "r") as siteLHfh:
+                    for line in siteLHfh:
+                        if line.startswith("6"):
+                            pass
+                        else:
+                            line = line.split()
+                            #print([i for i in value_list[v[0]-1:v[1]]])
+                            GLS = sum([float(i) for i in line[1:]][v[0]-1:v[1]])
+                            GLSvals.append(GLS)
+
+                for i in GLSvals:
+                    deltaGLSvals.append(GLSvals[0]-i)
+                print(k + "\t" + "\t".join(str(i) for i in GLSvals) + "\t" + "\t".join(str(i) for i in deltaGLSvals))
+                outfile.write(k + "\t" + "\t".join(str(i) for i in GLSvals) + "\t" + "\t".join(str(i) for i in deltaGLSvals) + "\n")
+
+
+
+rule likelihoodMapping:
+    input:
+        algn = "phylogeny-0/iqtree/mafft-trimal/concat.best_model.nex",
+        clusters = "other/clusters_likelihood_mapping.nex"
+    output:
+        "results/likelihoodMapping/likelihood_mapping.checkpoint"
+    params:
+        wd = os.getcwd(),
+        lmap = 2000,
+        skip_tree_search = "-n 0", # -n flag... allows to skip tree search, only assess the phylogenetic information of the alignment.
+        additional_params = "-wql",
+        prefix = "results/likelihoodMapping/gouania_likelihoodMapping"
+    conda: "iqtree.yml"
+    threads: 16
+    shell:
+        """
+        iqtree -p {params.wd}/{input.algn} -nt AUTO -ntmax {threads} {params.skip_tree_search} -lmclust {params.wd}/{input.clusters} -lmap {params.lmap} {params.additional_params} --prefix {params.wd}/{params.prefix}
+        touch {output}
+        """
+
+    
+
+rule gCF_sCF:
+    input:
+        gene_trees = "phylogeny-0/gene_trees/mafft-trimal/all_gene_trees.tre",
+        concat_tree = "phylogeny-0/iqtree/mafft-trimal/concat.treefile",
+        aln = "concat.nex"
+    output:
+        "results/concordance_factors/concord.checkpoint"
+        #"results/sCF/sCF_concord.checkpoint"
+    threads: 10
+    conda: "iqtree.yml"
+    params:
+        prefix = "results/concordance_factors/concord",
+        wd = os.getcwd()
+    shell:
+        """
+        iqtree -t {params.wd}/{input.concat_tree} --gcf {params.wd}/{input.gene_trees} -p {params.wd}/{input.aln} --scf 100 --prefix {params.wd}/{params.prefix}
+        touch {output}
+        """
+
+
+
+

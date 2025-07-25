@@ -1,0 +1,271 @@
+############################# SNAKEFILE #######################################
+################################################################################
+##### PCA, HETEROZYGOSITY AND WINDOW BASED POP-STATS (DA, XP-CLR, PI, CSS) #####
+################################################################################
+
+#snakemake -p --profile qsub_hs_test --keep-going --immediate-submit --use-conda
+
+from snakemake import utils
+
+import os, allel
+import sys
+sys.path.append("/data/antwerpen/grp/asvardal/hs_tools")
+import importlib
+from pypopgen3.modules import vcfpandas as vp
+from pypopgen3.modules import diversity as dv
+import logging
+#logging.getLogger("snakemake").setLevel(logging.ERROR)
+import numpy as np
+import pandas as pd
+#from loguru import logger
+from matplotlib import pyplot as plt
+import matplotlib as mpl
+#from pypopgen3.plot import plink
+
+configfile: "config.yaml"
+eu = os.path.expanduser
+jn = os.path.join
+
+sample_mt = pd.read_csv(config['sample_mt'],sep='\t').set_index('unique_ID',drop=False).fillna('')
+#sample_mt['location'] = sample_mt['location'].apply(lambda s: s.replace(' ','_'))
+sample_mt.index = sample_mt.index.astype(str)
+
+CHROMOSOMES = [str(i) for i in range(1,25) if i not in [23] ] # +  ['MT']
+chrom_length = pd.read_csv(str(config['ref']['base_fn'] + config['ref']['ext_fai']),
+                                   sep='\t',usecols=[0,1],names=['chrom','len'],index_col=0,
+                                                              squeeze=True)
+
+phase_dir = "/scratch/antwerpen/grp/asvardal/projects/clingfishes/projects/GouaniaPhylogenomics/snakemake/VariantCalling/results/VariantCalling/202103GouaniaGenomics_GCF_900634775.1_fGouWil2.1/phasing_tif1_sft1"
+callset_id = config['callset']['id']
+variant_dir="/scratch/antwerpen/grp/asvardal/projects/clingfishes/projects/GouaniaPhylogenomics/snakemake/VariantCalling/results/VariantCalling/202103GouaniaGenomics_GCF_900634775.1_fGouWil2.1/bcf_filter_tif1_sft1"
+ancestral_dir= "/scratch/antwerpen/grp/asvardal/projects/clingfishes/projects/GouaniaPhylogenomics/snakemake/add_ancestral/ancestral_vcf"
+
+TREEWINDOWSIZE = [20000]
+WINDOWSTEP = [20000] 
+VCFTYPE = ["variants", "all_sites"]
+MAF_PCA = [0.01, 0.05]
+POPMEASURE = ["pi", "dxy", "fst"]
+
+SPECIES_PAIRS = ["adriatica_pigra", "adriatica_orientalis", "adriatica_willdenowi", "adriatica_hofrichteri", "pigra_orientalis", "pigra_willdenowi", "pigra_hofrichteri", "orientalis_willdenowi", "orientalis_hofrichteri"]
+
+wildcard_constraints:
+    callset_id="[^.]+",
+    filter_id="[^.]+",
+    run_id="[^.]+",
+    pop1="[^.]+",
+    pop2="[^.]+",
+    maf="\d+.?\d*",
+    projection_type="[a-zA-Z0-9_]+",
+    #vcf_type="^((?!Chromosome).)*$",
+   # chrom="Chromosome|\d+[^.]+",
+    start="\d+",
+    end="\d+"
+
+
+rule all:
+    input:
+        expand("results/css/pca/css_step{window}_CSSm.100000perm.txt", window = "20000")
+
+#############################################
+#### DA in windows (popgenwindos based) #####
+#############################################
+
+
+### SIMON MARTINS SLIDING WINDOWS 
+# git clone https://github.com/simonhmartin/genomics_general.git 
+
+
+rule prep_VCF:
+    input:
+        vcf = "../VariantCalling/results/VariantCalling/202103GouaniaGenomics_GCF_900634775.1_fGouWil2.1/bcf_filter_tif1_sft1/all_sites.tif1.sft1.all_sites.chr{chrom}.pass.snps_indels.biallelic.vcf.gz"
+        #vcf = f"{ancestral_dir}/all_sites.tif1.sft1.all_sites.whatshap.shapeit4.annotate.pass.snps.biallelic.anc_samp.chr{{chrom}}.vcf.gz"
+        #vcf = f"{phase_dir}/all_sites.tif1.sft1.all_sites.whatshap.shapeit4.annotate.pass.snps.biallelic.chr{{chrom}}.vcf.gz"
+        #vcf = f"{variant_dir}/all_sites.tif1.sft1.all_sites.chr{{chrom}}.pass.snps.biallelic.vcf.gz"
+        #vcf = f"{phase_dir}/all_sites.tif1.sft1.variants.whatshap.shapeit4.annotate.pass.snps.biallelic.vcf.gz"
+    output:
+        geno = "input_files/all_sites.tif1.sft1.all_sites.chr{chrom}.pass.snps_indels.biallelic.geno.gz"
+        #geno = f"{ancestral_dir}/all_sites.tif1.sft1.all_sites.whatshap.shapeit4.annotate.pass.snps.biallelic.anc_samp.chr{{chrom}}.geno.gz"
+        #geno = f"{phase_dir}/all_sites.tif1.sft1.all_sites.whatshap.shapeit4.annotate.pass.snps.biallelic.chr{{chrom}}.geno.gz"
+        #geno = "input_files/all_sites.tif1.sft1.all_sites.chr{chrom}.pass.snps.biallelic.geno.gz",
+        #geno = f"{phase_dir}/all_sites.tif1.sft1.variants.whatshap.shapeit4.annotate.pass.snps.biallelic.geno.gz",
+        #pop_info = 'results/general_pop_stats/pop.info'
+        #pop_info = 'results/general_pop_stats/pop_eco.info'
+    #par:ams:
+    #    info = config["popgenWindows"]["col_pops"]
+    resources:
+        walltime = 3
+    run:
+        #popinfo = sample_mt[['sample_ID', params.info]]
+        #popinfo.to_csv(output.pop_info, sep ='\t',  header=False, index=False)
+        shell("bin/genomics_general/VCF_processing/parseVCF.py -i {input.vcf} | bgzip > {output.geno}")
+
+
+
+rule popgenWindows:
+    input:
+        geno = "input_files/all_sites.tif1.sft1.all_sites.chr{chrom}.pass.snps_indels.biallelic.geno.gz",
+        #geno = "input_files/all_sites.tif1.sft1.all_sites.chr{chrom}.pass.snps.biallelic.geno.gz",
+        #geno = f"{phase_dir}/all_sites.tif1.sft1.variants.whatshap.shapeit4.annotate.pass.snps.biallelic.geno.gz",
+        #geno = f"{phase_dir}/all_sites.tif1.sft1.all_sites.whatshap.shapeit4.annotate.pass.snps.biallelic.chr{{chrom}}.geno.gz",
+        pop_info = 'results/general_pop_stats/pop.info'
+        #pop_info = 'results/general_pop_stats/pop_eco.info'
+    output:
+        "results/popgenwindows/all_sites/all_sites.tif1.sft1.all_sites.chr{chrom}.pass.snps_indels.biallelic.w20000.m1000.s10000.Fst.Dxy.pi.csv.gz"
+        #"results/popgenwindows/all_sites/all_sites.tif1.sft1.all_sites.whatshap.shapeit4.annotate.pass.snps.biallelic.chr{chrom}.w20000.m1000.s10000.Fst.Dxy.pi.csv.gz"
+        #stats = "results/popgenwindows/all_sites/all_sites.tif1.sft1.all_sites.whatshap.shapeit4.annotate.pass.snps.biallelic.chr{chrom}.w20000.m1000.s20000.Fst.Dxy.pi.csv.gz"
+        #stats = "results/popgenwindows/all_sites.tif1.sft1.all_sites.chr{chrom}.pass.snps.biallelic.Fst.Dxy.pi.csv.gz" 
+        #stats = "results/general_pop_stats/all_sites.tif1.sft1.variants.whatshap.shapeit4.annotate.pass.snps.biallelic.Fst.Dxy.pi.csv.gz"
+        #stats = "results/general_pop_stats/all_sites.tif1.sft1.variants.whatshap.shapeit4.annotate.pass.snps.biallelic.Fst.Dxy.pi_ECO.csv.gz"
+    params:
+        window_size = config["popgenWindows"]["window_size"],
+        minimum_sites = config["popgenWindows"]["minimum_sites"],
+        sliding_size = config["popgenWindows"]["sliding_size"],
+        populations = " ".join(["-p " + i for i in list(sample_mt[str(config["popgenWindows"]["col_pops"])].value_counts().index)]),
+    resources:
+        mem_gb=16,
+        walltime=2
+    threads: 4 
+    shell:
+        """
+        bin/genomics_general/popgenWindows.py -g {input.geno} -o {output} \
+        -f phased \
+        -w {params.window_size} -m {params.minimum_sites}  -s {params.sliding_size}\
+        {params.populations} \
+        --popsFile {input.pop_info} -T {threads} \
+        --writeFailedWindows
+        """
+rule merge_popgenwindows:
+    input:
+        expand("results/popgenwindows/all_sites/all_sites.tif1.sft1.all_sites.chr{chrom}.pass.snps_indels.biallelic.w20000.m1000.s10000.Fst.Dxy.pi.csv.gz",  chrom = CHROMOSOMES)
+
+        #expand("results/popgenwindows/all_sites/all_sites.tif1.sft1.all_sites.whatshap.shapeit4.annotate.pass.snps.biallelic.chr{chrom}.w20000.m1000.s10000.Fst.Dxy.pi.csv.gz", chrom = CHROMOSOMES)
+    output:
+        "results/popgenwindows/all_sites.tif1.sft1.all_sites.pass.snps_indels.biallelic.w20000.m1000.s10000.Fst.Dxy.pi.Da.tsv.gz"
+        #"results/popgenwindows/all_sites.tif1.sft1.all_sites.whatshap.shapeit4.annotate.pass.snps.biallelic.w20000.m1000.s10000.Fst.Dxy.pi.Da.tsv.gz"
+    params:
+        input_prefix = "results/popgenwindows/all_sites/all_sites.tif1.sft1.all_sites.chr{}.pass.snps_indels.biallelic.w20000.m1000.s10000.Fst.Dxy.pi.csv.gz"
+        #input_prefix = "results/popgenwindows/all_sites/all_sites.tif1.sft1.all_sites.whatshap.shapeit4.annotate.pass.snps.biallelic.chr{}.w20000.m1000.s10000.Fst.Dxy.pi.csv.gz",
+    run:
+        chr1 = str(params.input_prefix).format("1")
+        df = pd.read_csv(chr1,compression='gzip')
+        
+        reference_header = [i for i in df.columns]
+        
+        for ch in CHROMOSOMES:
+            if ch == str(1):
+                pass
+            else:
+                df1 = pd.read_csv(str(params.input_prefix).format(ch),compression='gzip')
+
+                header_df1 = [i for i in df1.columns]
+
+                if set(reference_header) == set(header_df1):
+                    print(f"Chromosome {ch} has the same header like Chromosome 1!!")
+                    df = pd.concat([df, df1], axis=0)
+                    #print(ch, str([i for i in df1.columns]))
+                else:
+                    diff_header = [i for i in set(header_df1) - set(reference_header)]
+                    print(f"Change header of Chromosome {ch}!!")
+
+                    replace_dic = {}
+
+                    for i in diff_header:
+                        entry = i.split("_")[0]
+                        spec1 = i.split("_")[1]
+                        spec2 = i.split("_")[2]
+                        new = entry + "_" + spec2 + "_" + spec1
+                        replace_dic[i] = new
+                        print(f"For Chromosome {ch} the value {i} will be swapped to {new}!!")
+
+                    df1.rename(columns=replace_dic, inplace=True)
+
+                    header_df1_new = [i for i in df1.columns]
+                    #print(ch, header_df1_new)
+
+                    if set(reference_header) == set(header_df1_new):
+                        df = pd.concat([df, df1], axis=0)
+                    else: # Add error later
+                        print("something went wrong")
+
+        
+        ### NOW CALCULATE NET BETWEEEN GROUP DISTANCES dA = dxy - (dx + dy)/2
+
+        dxy = []
+        for i in df.columns:
+            if "dxy" in i:
+                dxy.append(i)
+            else:
+                pass
+
+        for i in dxy:
+            taxon1 = i.split("_")[1]
+            taxon2 = i.split("_")[2]
+            da = 'dA_{}_{}'.format(taxon1,taxon2)
+            df[da] = df[i] - (df[f'pi_{taxon1}'] + df[f'pi_{taxon2}'])/2
+
+        df.to_csv(str(output), sep = "\t", compression="gzip", index = False)
+
+
+
+#############################################
+########## CSS permutation ##################
+#############################################
+
+rule css:
+    input:
+        vcf = f"{phase_dir}/all_sites.tif1.sft1.variants.whatshap.shapeit4.annotate.pass.snps.biallelic.chr{{chrom}}.vcf.gz"
+    output:
+        "results/css/css_maf{maf}_window{window}_{chrom}.checkpoint"
+    params:
+        input_vcf = "results/css/all_sites.tif1.sft1.variants.whatshap.shapeit4.annotate.pass.snps.biallelic.chr{chrom}.vcf.gz",
+        grouplist = "input_files/css_groupfile.txt",
+        minsnps = 24
+    shell:
+        """
+        cp {input} results/css/
+        Rscript bin/PopGenCode/CSSm.R {params.input_vcf} {params.grouplist} {wildcards.window} {wildcards.window} {params.minsnps} basepair pca {wildcards.maf}
+        touch {output}
+        rm -rf {params.input_vcf}
+        """
+# outliers from css with permutation
+
+rule css_permut:
+    input:
+        "results/css/css_maf{maf}_window{window}_{chrom}.checkpoint",
+        #checks = "results/css/css_maf{maf}_window{window}_{chrom}.checkpoint",
+        vcf = f"{phase_dir}/all_sites.tif1.sft1.variants.whatshap.shapeit4.annotate.pass.snps.biallelic.chr{{chrom}}.vcf.gz",
+        dmat = "results/css/css_chr{chrom}_step{window}_CSSm.dmat.gz",
+        cssm = "results/css/css_chr{chrom}_step{window}.CSSm.txt"
+    output:
+        "results/css/css_permutation_maf{maf}_window{window}.{chrom}.checkpoint",
+        #"results/css/css_chr{chrom}_step{window}_CSSm.100000perm.txt"
+    params:
+        grouplist = "input_files/css_groupfile.txt",
+        permutations = 100000
+    shell:
+        """
+        Rscript bin/PopGenCode/CSSm_permutation.R  {input.vcf} {input.dmat} {input.cssm} {params.grouplist} {params.permutations}
+        touch {output}
+        """
+        
+rule merge_css_results:
+    input:
+        expand("results/css/pca/css_permutation_maf{maf}_window{window}.{chrom}.checkpoint", chrom = CHROMOSOMES, window = "20000", maf = 0.05),
+        expand("results/css/pca/css_chr{chrom}_step{window}_CSSm.100000perm.txt",  chrom = CHROMOSOMES, window = "20000")
+        #expand("results/css/css_chr{chrom}_step{window}.CSSm.txt", chrom = CHROMOSOMES, window = "20000")
+    output:
+        "results/css/pca/css_step{window}_CSSm.100000perm.txt"
+        #"results/css/css_step{window}.CSSm.txt",
+    run:
+        with open(str(output), "w") as outfile:
+            outfile.write("chr\tsta\tend\tnsnps\tcss\tqvalue\n")
+            for i in CHROMOSOMES:
+                with open("results/css/pca/css_chr{}_step{}_CSSm.100000perm.txt".format(i, wildcards.window), "r") as infile:
+                    for line in infile:
+                        if line.startswith("chr"):
+                            pass
+                        else:
+                            outfile.write(line)
+
+
+

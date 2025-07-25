@@ -1,0 +1,1040 @@
+# The main entry point of your workflow.
+# After configuring, running snakemake -n in a clone of this repository should successfully execute a dry-run of the workflow.
+# snakemake -p --profile qsub_hs_test --keep-going --immediate-submit --use-conda
+#
+
+import subprocess
+from scipy import stats
+import pandas as pd
+import numpy as np
+import os, yaml
+import pysam
+from matplotlib import pyplot as plt
+jn = os.path.join
+
+#run with
+# snakemake -p --profile qsub_hs  2>&1 --rerun-incomplete --keep-going --immediate-submit --restart-times 2 | tee run.log
+## get failed jobs
+#  grep "Job Exit Code :" snakejob.haplotype_caller.*o*  | grep -v 0 | py -x 'x.split(".o")[0]' > failed_jobs.ls
+#get failed sequence ids: this should be made more general for all wildcards
+
+#snakemake -p --profile qsub_hs_test  --rerun-incomplete --immediate-submit --restart-times 2 `tail -n +2 failed_sequence_ids.txt | py -l "' '.join(['../../_data/VariantCalling/97betta/{}.g.vcf.gz'.format(id) for id in l])" ` 2>&1
+
+#snakemake -p --profile qsub_hs_test --keep-going --immediate-submit
+
+
+## Config
+configfile: "meta_config/config.yaml"
+
+
+
+
+#Global parameters
+CHROMOSOMES = [str(i) for i in range(1,25) if i not in [23] ] # +  ['MT']
+
+sample_mt = pd.read_csv(config["sample_mt"],
+                        dtype=str, sep='\t').set_index("sample_ID", drop=False)
+
+
+chunk_size = 5e6 #define chunk size here
+
+chrom_length = pd.read_csv(config['ref']['base_fn'] + config['ref']['ext_fai'],
+                           sep='\t',usecols=[0,1],names=['chrom','len'],index_col=0,
+                           squeeze=True)
+max_chrom_length = chrom_length.max()
+chunk_to_region = {i:(int(i*chunk_size+1),
+                      int((i+1)*chunk_size)) for i in range(int(np.ceil(max_chrom_length/chunk_size)))}
+
+CHUNKS = range(len(chunk_to_region))
+
+sample_mt.drop_duplicates(inplace=True)
+
+def is_num(s):
+    try:
+        int(s)
+        return True
+    except ValueError:
+        return False
+
+exclude_IDs = ["lepadogaster_D86"]
+sequence_IDS = [i for i in sample_mt['sample_ID'].values if i not in exclude_IDs]
+
+samples = sequence_IDS
+n_samples = len(sequence_IDS)
+print(n_samples)
+
+
+#sample_mt = sample_mt.drop(index=failed_haplotypecaller)
+
+
+#This is important, because otherwise the wildcards in the rules are ambiguous
+
+wildcard_constraints:
+    i="\d+",
+    contig="\d+",
+    chrom="\w+",
+    ref_fn=".*.fa",
+    #sequence_id="\w+",
+    ind_filter_id="[^.]+",
+    site_filter_id="[^.]+",
+    family_id="\w+",
+    filter_id="[^.]+",#"^/(?!raw|all_sites)([^.]+)$"
+    chunk="\d+",
+    vcf_type="(pass.snps.biallelic|pass.indels.biallelic|variants)",
+    vcf_extention="(vcf.gz|bcf)"
+            #"[^.]+",
+
+print(samples)
+def logfun(wildcards, rule):
+    return rule
+
+ref_indexes = ['.amb', '.ann', '.bwt', '.pac','.sa','.fai']
+
+read_direction = ["1","2"]
+
+
+ind_filter_id ='tif1'
+site_filter_id = 'sft1'
+
+
+rule all:
+    input:
+        expand('results/VariantCalling/{}_{}/bcf_filter_tif1_sft1/all_sites.tif1.sft1.all_sites.chr{{chrom}}.pass.snps_indels.biallelic.vcf.gz'.format(config['callset']['id'], config['ref']['name']), chrom = CHROMOSOMES)
+
+#        expand('results/VariantCalling/{}_{}/bcf_filter_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.pass.indels.biallelic.{{chrom}}.bcf'.format(config['callset']['id'], config['ref']['name']), site_filter_id=site_filter_id, ind_filter_id=ind_filter_id, chrom = CHROMOSOMES, vcf_type = ["variants"])
+
+        #expand('results/VariantCalling/{}_{}/phasing_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.{{vcf_type}}.whatshap.chr{{chrom}}.bcf'.format(config['callset']['id'], config['ref']['name']), site_filter_id=site_filter_id, ind_filter_id=ind_filter_id, chrom = CHROMOSOMES, vcf_type = ["all_sites"])
+        #expand('results/VariantCalling/{}_{}/bcf_filter_tif1_sft1/all_sites.tif1.sft1.all_sites.chr{{chrom}}.pass.snps.biallelic.vcf.gz'.format(config['callset']['id'], config['ref']['name']), chrom = CHROMOSOMES)
+        #expand('results/VariantCalling/{}_{}/bcf_filter_tif1_sft1/all_sites.tif1.sft1.all_sites.chr{{chrom}}.bcf'.format(config['callset']['id'], config['ref']['name']), chrom = CHROMOSOMES)
+#        expand('results/VariantCalling/{}_{}/phasing_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.{{vcf_type}}.whatshap.shapeit4.annotate.pass.snps.biallelic.chr{{chrom}}.vcf.gz'.format(config['callset']['id'], config['ref']['name']), site_filter_id=site_filter_id, ind_filter_id=ind_filter_id, chrom = CHROMOSOMES, vcf_type = ["variants"])
+
+rule bwa_index:
+    input:
+        ref="{}{}".format(config['ref']['base_fn'], config['ref']['ext_fa'])
+    output:
+        "{}{}.amb".format(config['ref']['base_fn'], config['ref']['ext_fa']),
+        "{}{}.ann".format(config['ref']['base_fn'], config['ref']['ext_fa']),
+        "{}{}.bwt".format(config['ref']['base_fn'], config['ref']['ext_fa']),
+        "{}{}.pac".format(config['ref']['base_fn'], config['ref']['ext_fa']),
+        "{}{}.sa".format(config['ref']['base_fn'], config['ref']['ext_fa']),
+        "{}{}.fai".format(config['ref']['base_fn'], config['ref']['ext_fa']),
+        dict="{}.dict".format(config['ref']['base_fn'])
+
+    params:
+        name=config['ref']['name']
+    shell:
+        """
+        samtools faidx {input.ref}
+        samtools dict -a {params.name} -s 'Gouania adriatica'  {input.ref} -o {output.dict}
+        bwa index {input.ref}
+        """
+
+rule align_reads:
+    priority: 50
+    input:
+        readf = "data/raw_data/{seqrunID}_1.fq.gz",
+        readr = "data/raw_data/{seqrunID}_2.fq.gz",
+        ref = config['ref']['base_fn'] + config['ref']['ext_fa'],
+        indices = [config['ref']['base_fn']+config['ref']['ext_fa'] + ex for ex in ref_indexes]
+    output:
+        bam='results/Alignment/{}/{{seqrunID}}.fixmate.sort.markdup.rg.bam'.format(config['ref']['name']),
+    threads: 12
+    resources:
+        mem_gb=24, #lambda wildcards, threads: threads*2,
+        walltime=48
+    params:
+        add_cpus = lambda wildcards, threads: threads-1,
+        fb = lambda wildcards: 'results/Alignment/{}/{}'.format(config['ref']['name'], wildcards.seqrunID),
+        #ext = lambda wildcards: sample_mt.loc[wildcards['sequence_id'],
+        #                                      'read_files'].rsplit('.',1)[-1],
+        sample_id = lambda wildcards: sample_mt.loc[wildcards.seqrunID, 'unique_ID']
+##        #rg = 'test',# -R '{params.rg}' #could specifiy read group like this
+    run:
+        #s = sample_mt.loc[wildcards['seq_runID']]
+        #-F 0x200 means remove QC failed reads;
+        # don't use -M in bwa mem!!
+        #if s['read_type'] == 'cram':
+        #    c0 = 'samtools fastq -F 0x200 {input.reads} | bwa mem -t {threads} -R "@RG\\tID:{params.sample_id}\\tSM:{wildcards.sequence_id}\\tPL:ILLUMINA" -p {input.ref} - '
+        #elif s['read_type'] == 'bam':
+        #    c0 = 'samtools sort -n {input.reads} | samtools fastq -F 0x200 - | bwa mem -t {threads} -R "@RG\\tID:{params.sample_id}\\tSM:{wildcards.sequence_id}\\tPL:ILLUMINA" -p {input.ref} - '
+        #if s['read_type']  == 'fastq_pe':
+        #    ext = s['read_files'].rsplit('.',1)[-1]
+        #    if ext=='gz':
+        #        c0 = 'bwa mem -t {{threads}} -R "@RG\\tID:{{params.sample_id}}\\tSM:{{wildcards.sequence_id}}\\tPL:ILLUMINA" {{input.ref}} <(gzip -dc {}) <(gzip -dc {}) '.format(input.readf, input.readr)
+        #    else:
+        #        c0 = 'bwa mem -t {{threads}} -R "@RG\\tID:{{params.sample_id}}\\tSM:{{wildcards.sequence_id}}\\tPL:ILLUMINA" {{input.ref}} {} {} '.format(s['read_files'].split(','))
+        #elif s['read_type']  == 'fastq_interleaved':
+        #elif s['read_type']  in ['fastq_single', 'fastq_interleaved']:
+        #    ext = s['read_files'].rsplit('.',1)[-1]
+        #    if ext=='gz':
+        #        c0 = 'bwa mem -p -t {{threads}} -R "@RG\\tID:{{params.sample_id}}\\tSM:{{wildcards.sequence_id}}\\tPL:ILLUMINA" {{input.ref}} <(gzip -dc {}) '.format(s['read_files'])
+        #    else:
+        #        c0 = 'bwa mem -p -t {{threads}} -R "@RG\\tID:{{params.sample_id}}\\tSM:{{wildcards.sequence_id}}\\tPL:ILLUMINA" {{input.ref}} {} '.format(s['read_files'])
+        #else:
+        #    raise ValueError("{} Sample_mt read_type must be in: [cram, bam, fastq_pe, fastq_single, fastq_interleaved].".format(wildcards['sequence_id']))
+        c0 = 'bwa mem -t {{threads}} -R "@RG\\tID:{{params.sample_id}}\\tSM:{{wildcards.seqrunID}}\\tPL:ILLUMINA" {{input.ref}} <(gzip -dc {}) <(gzip -dc {}) '.format(input.readf, input.readr)
+        c1 = (" | samtools fixmate -@ {params.add_cpus} -m - - "
+           " | samtools sort -T {params.fb}.sort.tmp -@ {params.add_cpus} - "
+           " | samtools markdup -T {params.fb}.markdup.tmp -@ {params.add_cpus} - {params.fb}.fixmate.sort.markdup.rg.bam; ")
+
+        c2 = "  samtools index {params.fb}.fixmate.sort.markdup.rg.bam"
+        
+        shell(c0 + c1 + c2)
+
+rule flagstat:
+    input:
+        bam = 'results/Alignment/{}/{{seqrunID}}.fixmate.sort.markdup.rg.bam'.format(config['ref']['name'])
+    output:
+        flagstat = 'results/Alignment/{}/{{seqrunID}}.fixmate.sort.markdup.rg.bam.flagstat'.format(config['ref']['name'])
+    resources:
+        mem_gb=1,
+        walltime=1
+    shell:
+        'samtools flagstat {input.bam} > {output.flagstat}'
+
+
+###################### crumble.cram ######################
+
+rule crumble_compress:
+    input:
+        bam = 'results/Alignment/{}/{{seqrunID}}.fixmate.sort.markdup.rg.bam'.format(config['ref']['name']), 
+        ref = config['ref']['base_fn'] + config['ref']['ext_fa']
+    output:
+        CC = 'results/Alignment/{}/{{seqrunID}}.mem.crumble.cram'.format(config['ref']['name']),
+        CC_crai = 'results/Alignment/{}/{{seqrunID}}.mem.crumble.cram.crai'.format(config['ref']['name'])
+    threads: 1
+    resources:
+        mem_gb= lambda wildcards, threads: threads*2,
+        walltime = 24
+    shell:
+        """
+        /data/antwerpen/grp/asvardal/software/crumble/crumble -O cram,reference={input.ref},lossy_names {input.bam} {output.CC}
+        samtools index {output.CC} {output.CC_crai}
+        """
+
+#rule cram_index:
+#    input:
+#        CC = f"{alignment_dir}/{{study_name}}/{{sequence_id}}/{ref_name}/{{sequence_id}}.mem.crumble.cram"
+ #   output:
+ #       CC_crai = f"{alignment_dir}/{{study_name}}/{{sequence_id}}/{ref_name}/{{sequence_id}}.mem.crumble.cram.crai"
+#    threads: 1
+#    resources:
+#        mem_gb= lambda wildcards, threads: threads*2,
+#        walltime = 1
+#    shell:
+#        'samtools index {input.CC} {output.CC_crai}'
+
+###################### calling all sites ######################
+
+rule call_all_sites_vcf:
+    input:
+        bams = expand('results/Alignment/{}/{{seqrunID}}.fixmate.sort.markdup.rg.bam'.format(config['ref']['name']), seqrunID = sequence_IDS),
+        ref = config['ref']['base_fn'] + config['ref']['ext_fa']
+        #crams = expand(f"{alignment_dir}/{{study_name}}/{{sequence_id}}/{ref_name}/{{sequence_id}}.mem.crumble.cram", zip, study_name = studies, sequence_id = samples),
+        #index = expand(f"{alignment_dir}/{{study_name}}/{{sequence_id}}/{ref_name}/{{sequence_id}}.mem.crumble.cram.crai", zip, study_name = studies, sequence_id = samples),
+    output:
+        bcf = 'results/VariantCalling/{}_{}/bcf/all_sites.chr{{chrom}}.{{chunk}}.bcf'.format(config['callset']['id'], config['ref']['name']),
+        tot_dp = 'results/VariantCalling/{}_{}/coverage/total_coverage_{{chrom}}.{{chunk}}.txt'.format(config['callset']['id'], config['ref']['name'])
+    threads: 2
+    resources:
+        mem_gb=4, #lambda wildcards, threads: threads*2,
+        walltime=24
+    params:
+        regions = lambda wildcards: wildcards.chrom + ":{}-{}".format(*chunk_to_region[int(wildcards.chunk)])
+    shell:
+        """
+        bcftools mpileup \
+            -a FORMAT/AD,FORMAT/DP \
+            -d 3000 \
+            --threads {threads} \
+            -Ou \
+            --regions {params.regions} \
+            -f {input.ref} \
+            {input.bams} \
+        | bcftools call \
+            --threads {threads} \
+            -f GQ \
+            -m \
+            -Ou \
+        | bcftools +fill-tags \
+            --threads {threads} \
+            -Ob \
+            | tee {output.bcf} | bcftools query -f '[%DP\t]\n' \
+            | awk '{{for(i=1; i<=NF;i++) dp_tot[i]+=$i}} END{{for(i=1; i<=NF;i++) {{printf dp_tot[i]"\\t"}}; printf "\\n"}}' \
+          > {output.tot_dp}; \
+        bcftools index {output.bcf}
+        """
+
+def get_chunks(chrom):
+    chunks = range(int(np.ceil(chrom_length[chrom] / chunk_size)))
+    return  chunks
+
+
+def get_total_dp_files(wildcards):
+    cov_files = []
+    for chrom in CHROMOSOMES:
+        for chunk in get_chunks(chrom):
+            fn = 'results/VariantCalling/{}_{}/coverage/total_coverage_{}.{}.txt'.format(config['callset']['id'], config['ref']['name'], chrom, chunk)
+            cov_files.append(fn)
+    return cov_files
+
+def write_dp(fn, samples, dps):
+    with open(fn,'w') as f:
+        for sample, dp in zip(samples, dps):
+            f.write(sample + '\t' + str(dp) + '\n')
+
+def read_dp(fn):
+    #load mean depth dictionary
+    dp_dic = {}
+    with open(fn) as f:
+        for line in f.readlines():
+            sample, dp = line.strip().split()
+            dp_dic.update({sample: float(dp)})
+    return dp_dic
+
+rule get_mean_coverage:
+    input:
+        total_dps = get_total_dp_files
+    output:
+        cov =  'results/VariantCalling/{}_{}/coverage/mean_coverage.txt'.format(config['callset']['id'], config['ref']['name'])
+    run:
+        mean_dps = [0 for i in range(n_samples)]
+        for fn in input.total_dps:
+            with open(fn) as f:
+                for i, d in enumerate(f.readline().strip().split()):
+                    mean_dps[i] += float(d)
+        mean_dps = np.array(mean_dps) / (chrom_length.loc[CHROMOSOMES].sum()) #if not TEST else N_TEST_CHUNKS*chunk_size*len(CHROMOSOMES))
+        write_dp(output.cov, samples, mean_dps)
+
+
+
+bins = {'MQ': np.linspace(0,61,62),
+                'DP': None, # will be set based on mean_dp below
+                'MQ0F': np.linspace(0,1,101),
+                'MQSB': np.linspace(0,1,101),
+                'DD': np.linspace(0,10,401),
+                'ExcHetOrig': np.linspace(0,1,101),
+                'AB_Het': np.linspace(0,100,401),
+                'MF': None } # will be set based on sample_number below
+
+
+rule min_max_dp:
+    input:
+        cov =  'results/VariantCalling/{}_{}/coverage/mean_coverage.txt'.format(config['callset']['id'], config['ref']['name'])
+    output:
+        min_dp = 'results/VariantCalling/{}_{}/coverage/low_coverage.{{ind_filter_id}}.txt'.format(config['callset']['id'], config['ref']['name']),
+        max_dp = 'results/VariantCalling/{}_{}/coverage/excess_coverage.{{ind_filter_id}}.txt'.format(config['callset']['id'], config['ref']['name'])
+    params:
+        filter_thresh = lambda wildcards: config['individual_filter_sets'][wildcards.ind_filter_id],
+    run:
+        mean_dp_dic = read_dp(input.cov)
+        #calculate dictionaries for min/max coverage
+        # per sample based on Poisson dist and pvals defined under params
+        min_dp = []
+        max_dp = []
+        for dp in mean_dp_dic.values():
+            #get the depth thresholds corresponding to <> ind_dp_to_missing_pval of low/excessice coverage
+            min_dp.append(stats.poisson.ppf(params.filter_thresh['min_dp_to_missing_pval'], dp))
+            max_dp.append(stats.poisson.isf(params.filter_thresh['max_dp_to_missing_pval'], dp))
+        write_dp(output.min_dp, mean_dp_dic.keys(), min_dp)
+        write_dp(output.max_dp,mean_dp_dic.keys(), max_dp)
+
+rule get_filter_stats:
+    """
+    This rule calculates filter stats and
+    sets individual genotypes to missing according
+    thresholds defined in the config file.
+    """
+    input:
+        bcf = 'results/VariantCalling/{}_{}/bcf/all_sites.chr{{chrom}}.{{chunk}}.bcf'.format(config['callset']['id'], config['ref']['name']),
+        cov =  'results/VariantCalling/{}_{}/coverage/mean_coverage.txt'.format(config['callset']['id'], config['ref']['name']),
+        min_dp = 'results/VariantCalling/{}_{}/coverage/low_coverage.{}.txt'.format(config['callset']['id'], config['ref']['name'], ind_filter_id),
+        max_dp = 'results/VariantCalling/{}_{}/coverage/excess_coverage.{}.txt'.format(config['callset']['id'], config['ref']['name'], ind_filter_id) 
+    output:
+        bcf = 'results/VariantCalling/{}_{}/bcf_filter_{{ind_filter_id}}/all_sites.{{ind_filter_id}}.chr{{chrom}}.{{chunk}}.bcf'.format(config['callset']['id'], config['ref']['name']),
+        filter_per_sample = 'results/VariantCalling/{}_{}/filter_{{ind_filter_id}}/filter_per_sample.{{ind_filter_id}}.chr{{chrom}}.{{chunk}}.tsv'.format(config['callset']['id'], config['ref']['name']),
+        total_per_sample = 'results/VariantCalling/{}_{}/filter_{{ind_filter_id}}/total_per_sample.{{ind_filter_id}}.chr{{chrom}}.{{chunk}}.tsv'.format(config['callset']['id'], config['ref']['name']),
+        stat_hists = 'results/VariantCalling/{}_{}/filter_{{ind_filter_id}}/stat_hists.{{ind_filter_id}}.chr{{chrom}}.{{chunk}}.yaml'.format(config['callset']['id'], config['ref']['name']),
+        individual_dp_hists = 'results/VariantCalling/{}_{}/filter_{{ind_filter_id}}/individual_dp_hists.{{ind_filter_id}}.chr{{chrom}}.{{chunk}}.yaml'.format(config['callset']['id'], config['ref']['name'])
+        #**{stat:f'{stat}_{{chrom}}.npy' for stat in bins.keys()},
+        #**{sample:f'dp_{sample}_{{chrom}}.npy' for sample in samples}
+    threads: 2
+    resources:
+        mem_gb = 4, #lambda wildcards, threads: threads*2,
+        walltime = 12 #might need to be higher for large samples
+    params:
+        filter_thresh=lambda wildcards: config['individual_filter_sets'][wildcards.ind_filter_id],
+        flush_interval = 1e5,
+        #regions = lambda wildcards: ((wildcards.chrom, START, END) if TEST else [])
+        regions = lambda wildcards: (wildcards.chrom, chunk_to_region[int(wildcards.chunk)][0],
+                                     chunk_to_region[int(wildcards.chunk)][1] )
+    run:
+        def flush_data():
+            for stat, b in bins.items():
+                dt = np.array(temp_data[stat])
+                dt[dt > b[-1]] = b[-1]
+                dt[dt < b[0]] = b[0]
+                h, _ = np.histogram(dt,bins=b)
+                hists[stat] += h
+                temp_data[stat] = []
+            for sample, b in dp_per_sample_bins.items():
+                dt = np.array(dp_per_sample_tmp[sample])
+                dt[dt > b[-1]] = b[-1]
+                dt[dt < b[0]] = b[0]
+                h, _ = np.histogram(dt,bins=b)
+                dp_per_sample_hists[sample] += h
+                dp_per_sample_tmp[sample] = []
+
+
+        #input file stream
+        bcf_in = pysam.VariantFile(input.bcf)  # auto-detect input format
+        samples1 = [s for s in bcf_in.header.samples]
+        for i, (s0, s1) in enumerate(zip(samples, samples1)):
+            assert s0==s1,  ("Sample at position {} in metadata and vcf are not the same."
+                                        "Metadata {} != VCF {}. That can lead to unexpected behaviour.".format(i,s0, s1))
+
+        n_samples1 = len(samples)
+        assert n_samples == n_samples1, "Number of samples in metadata ({}) and VCF ({}) not the same:".format(n_samples, n_samples1)
+        bins['MF'] = np.linspace(0, 1, n_samples + 1)
+
+        #this is an output stream to recalculate AN, AC etc after setting some GTs to ./. below
+        filltag_stream = subprocess.Popen(['bcftools +fill-tags -Ob'],
+                stdin=subprocess.PIPE,
+                stdout=open(output.bcf, 'w'),
+                stderr=subprocess.PIPE,shell=True,
+                encoding='utf8')
+
+
+        #load mean depth dictionary
+        mean_dp_dic = read_dp(input.cov)
+#         mean_dp_dic2 = {} 
+#         mean_dp_dic_empty = {}
+#         samples_nempty = []
+#         samples_empty = []
+#         for s in samples:
+#             if mean_dp_dic[s] > 0:
+#                 mean_dp_dic2[s] =+ mean_dp_dic[s]
+#                 samples_nempty.append(s)
+#             else:
+#                 mean_dp_dic_empty[s] =+ mean_dp_dic[s]
+#                 samples_empty.append(s)
+        total_dp = np.sum([v for v in mean_dp_dic.values()])
+        bins['DP'] = np.arange(0,4 * total_dp, 1)
+
+        #calculate dictionaries for min/max coverage
+        # per sample based on Poisson dist and pvals defined under params
+        min_dp_dic = read_dp(input.min_dp)
+        max_dp_dic = read_dp(input.max_dp)
+
+        #new info annotations calculated below added to vcf header
+        bcf_in.header.info.add('DD',1,'Float',
+                'Average across samples of deviation from individual mean coverage in units of standard deviation.')
+        bcf_in.header.info.add('ExcHetOrig','A','Float',
+                'Excess Heterozygosity before genotype filtering.')
+        bcf_in.header.info.add('AB_Het',1,'Float',
+                'Phred-scaled p-value of binomial test for allele balance violation in heterozygous genotypes. Larger is worse.')
+        bcf_in.header.info.add('MF',1,'Float',
+                'Fraction of missing (./.) genotypes after genotype filtering.')
+
+        #output object, note how this is piped into filltag_stream for recalcuating INFO tags
+        bcf_out = pysam.VariantFile(filltag_stream.stdin,'wu', header=bcf_in.header)
+
+        #filter stats
+        filter_per_sample = {s: {'allele_balance': 0,
+                                 'low_depth': 0,
+                                 'high_depth': 0,
+                                 'low_gq': 0} for s in samples}
+        total_per_sample = copy.deepcopy(filter_per_sample)
+
+
+        # the below defines objects to store indoividual depth values
+        # and calculate and sum histograms each flush interval
+        dp_per_sample_tmp = {s: [] for s in samples}
+        dp_per_sample_bins = {s: np.arange(0,5 * mean_dp_dic[s],1) for s in samples}
+        dp_per_sample_hists = {k: np.zeros(len(v) - 1) for k, v in dp_per_sample_bins.items()}
+
+        # the below defines objects to store INFO column statistics per line
+        # and calculate and sum histograms each flush interval
+
+        hists = {k: np.zeros(len(v) - 1) for k, v in bins.items()}
+        temp_data = {k: [] for k in bins.keys()}
+
+        for i, rec in enumerate(bcf_in.fetch(*params.regions)):
+            deviations = []
+            ads_hets = np.array([0, 0])
+            missing = 0
+            for n, s in rec.samples.items():
+                dp = s['DP']
+                if (dp <= min_dp_dic[n]):
+                    s['GT'] = (None, None)
+                    filter_per_sample[n]['low_depth'] += 1
+                total_per_sample[n]['low_depth'] += 1
+
+                if (dp >= max_dp_dic[n]):
+                    s['GT'] = (None, None)
+                    filter_per_sample[n]['high_depth'] += 1
+                total_per_sample[n]['high_depth'] += 1
+
+                #test for het
+                if s['GT'][0] != s['GT'][1]:
+                    ad = np.array(s['AD'])[list(s['GT'])]
+                    ads_hets += ad
+                    ab_pval = stats.binom_test(ad)
+                    if ab_pval <= params.filter_thresh['ab_test_thresh']:
+                        s['GT'] = (None, None)
+                        filter_per_sample[n]['allele_balance'] += 1
+                    total_per_sample[n]['allele_balance'] += 1
+
+                deviation = np.abs(s['DP'] - mean_dp_dic[n]) / np.sqrt(mean_dp_dic[n])
+                deviations.append(deviation)
+                try:
+                    if s['GQ'] < params.filter_thresh['min_GQ']:
+                        s['GT'] = (None, None)
+                        filter_per_sample[n]['low_gq']+= 1
+                    total_per_sample[n]['low_gq'] += 1
+                except KeyError:
+                    pass
+
+                #add to individual depth list
+                dp_per_sample_tmp[n].append(s['DP'])
+                if s['GT'] == (None, None):
+                    missing += 1
+            missing_fraction = missing * 1. / n_samples
+            rec.info.update({'MF': missing_fraction})
+
+            #this calculated the mean across individuals of standardised DP deviation
+            #large value means that at this site many individuals have a coverage
+            #very different from their mean coverage
+            mean_deviation = np.mean(deviations)
+            rec.info.update({'DD': mean_deviation})
+
+            #if there are any hets, calculate Allele Balance across all samples
+            if np.any(ads_hets):
+                ab_pval = stats.binom_test(ads_hets)
+                ab_phred = -10 * np.log10(ab_pval)
+                rec.info.update({'AB_Het': ab_phred})
+                rec.info.update({'ExcHetOrig': rec.info['ExcHet']})
+
+            for stat, l in temp_data.items():
+                try:
+                    st = rec.info[stat]
+
+                    if stat == 'ExcHetOrig':
+                        st = st[0]
+                    if st is not None:
+                        l.append(st)
+                except KeyError:
+                    pass
+
+            if not (i + 1) % params.flush_interval:
+                flush_data()
+            #write the line to the output stream
+            bcf_out.write(rec)
+        #add stats to histogram for last interval
+        flush_data()
+
+        stat_dic = {}
+        for stat, h in hists.items():
+            b = bins[stat]
+            stat_dic.update({stat:
+                                 {'bins': [float(b0) for b0 in b],
+                                  'hists': [int(i) for i in h]}})
+        yaml.dump(stat_dic, open(output.stat_hists,'w'))
+
+        d = {}
+        for sample, h in dp_per_sample_hists.items():
+            b = dp_per_sample_bins[sample]
+            d.update({sample:
+                          {'bins': [float(b0) for b0 in b],
+                           'hists': [int(i) for i in h]}})
+        yaml.dump(d, open(output.individual_dp_hists,'w'))
+
+        filter_per_sample_df = pd.DataFrame(filter_per_sample)
+        filter_per_sample_df.index.name = 'statistic'
+        filter_per_sample_df.columns.name = 'sample'
+        filter_per_sample_df.to_csv(output.filter_per_sample,sep='\t')
+
+        total_per_sample_df = pd.DataFrame(total_per_sample)
+        total_per_sample_df.index.name = 'statistic'
+        total_per_sample_df.columns.name = 'sample'
+        total_per_sample_df.to_csv(output.total_per_sample, sep='\t')
+
+        bcf_out.close()
+        o,e = filltag_stream.communicate()
+        if o is not None:
+            print(o,file=sys.stdout)
+        if e is not None:
+            print(e, file=sys.stderr)
+
+rule plot_individual_filter_stats:
+    """
+    Plots staistics of indiviudal
+    genotypes set to ./. because of
+    filter thresholds.
+    Also plots individual DP distributions
+    """
+    input:
+        filter_per_samples = ['results/VariantCalling/{}_{}/filter_{{ind_filter_id}}/filter_per_sample.{{ind_filter_id}}.chr{}.{}.tsv'.format(config['callset']['id'], config['ref']['name'], chrom, chunk) \
+                             for chrom in CHROMOSOMES for chunk in get_chunks(chrom)],
+        total_per_samples = ['results/VariantCalling/{}_{}/filter_{{ind_filter_id}}/total_per_sample.{{ind_filter_id}}.chr{}.{}.tsv'.format(config['callset']['id'], config['ref']['name'], chrom, chunk) \
+                             for chrom in CHROMOSOMES for chunk in get_chunks(chrom)],
+        individual_dp_hists = ['results/VariantCalling/{}_{}/filter_{{ind_filter_id}}/individual_dp_hists.{{ind_filter_id}}.chr{}.{}.yaml'.format(config['callset']['id'], config['ref']['name'], chrom, chunk) \
+                               for chrom in CHROMOSOMES for chunk in get_chunks(chrom)],
+        min_dp = 'results/VariantCalling/{}_{}/coverage/low_coverage.{{ind_filter_id}}.txt'.format(config['callset']['id'], config['ref']['name']),
+        max_dp = 'results/VariantCalling/{}_{}/coverage/excess_coverage.{{ind_filter_id}}.txt'.format(config['callset']['id'], config['ref']['name'])
+    output:
+        ind_dp_hist_pdf = 'results/VariantCalling/{}_{}/plots/individual_dp_hist.{{ind_filter_id}}.pdf'.format(config['callset']['id'], config['ref']['name']),
+        ind_dp_hist_svg = 'results/VariantCalling/{}_{}/plots/individual_dp_hist.{{ind_filter_id}}.svg'.format(config['callset']['id'], config['ref']['name']),
+        filter_per_sample_pdf = 'results/VariantCalling/{}_{}/plots/filter_per_sample.{{ind_filter_id}}.pdf'.format(config['callset']['id'], config['ref']['name']),
+        filter_per_sample_svg = 'results/VariantCalling/{}_{}/plots/filter_per_sample.{{ind_filter_id}}.svg'.format(config['callset']['id'], config['ref']['name']),
+    #params:
+    #    filter_thresh = lambda wildcards: config['individual_filter_sets'][wildcards.ind_filter_id],
+    run:
+        #Bar plots of how many genotypes per sample were set to mission because
+        #of each of the filters
+        filtered = pd.read_csv(input.filter_per_samples[0], sep='\t', index_col=0)
+        total = pd.read_csv(input.total_per_samples[0],sep='\t',index_col=0)
+
+        for fn1, fn2 in zip(input.filter_per_samples[1:], input.total_per_samples[1:]):
+            f = pd.read_csv(fn1, sep='\t', index_col=0)
+            t = pd.read_csv(fn2, sep='\t', index_col=0)
+            filtered += f
+            total += t
+        rel_filter = filtered / total
+
+        n_cols = 1
+        n_rows = int(np.ceil(len(filtered) / n_cols))
+        fig = plt.figure(figsize=(0.2 * n_samples, 4 * n_rows))
+        for i, (stat, f) in enumerate(rel_filter.iterrows()):
+            ax = fig.add_subplot(n_rows,n_cols,i + 1)
+            f.plot(kind='bar',ax=ax,legend=False,label='Total')
+            ax.set_title(stat)
+            ax.set_ylabel("Proportion filtered")
+        plt.tight_layout()
+
+        plt.savefig(output.filter_per_sample_pdf, bbox_inches='tight')
+        plt.savefig(output.filter_per_sample_svg, bbox_inches='tight')
+
+        #dictionaries for min/max coverage
+        # per sample based on Poisson dist and pvals defined under params
+        min_dp_dic = read_dp(input.min_dp)
+        max_dp_dic = read_dp(input.max_dp)
+        with open(input.individual_dp_hists[0]) as f:
+            sd = yaml.safe_load(f)
+            bins = {s:v['bins'] for s,v in sd.items()}
+            hists = {s:np.array(v['hists']).astype(int) for s,v in sd.items()}
+        for fn in input.individual_dp_hists[1:]:
+            with open(fn) as f:
+                sd = yaml.safe_load(f)
+                bins1 = {s: v['bins'] for s, v in sd.items()}
+                hists1 = {s: np.array(v['hists']).astype(int) for s, v in sd.items()}
+                assert bins1 == bins
+                for s,h in hists1.items():
+                    hists[s] += h
+        bins = {s:np.array(v) for s,v in bins.items()}
+
+        #fig = plt.figure(figsize=(16,5*int(np.ceil(len(hists) / 3))))
+        fig = plt.figure(figsize=(16,40))
+        for i,(sample, h) in enumerate(hists.items()):
+            ax = fig.add_subplot(np.ceil(len(hists) / 3), 3, i+1)
+            #poss = bins[sample][:-1] + (bins[sample][1:] - bins[sample][:-1]) / 2
+            plt.bar(bins[sample][:-1], h, width=bins[sample][1:] - bins[sample][:-1], align='edge')
+            mn = min_dp_dic[sample]
+            mx = max_dp_dic[sample]
+            plt.axvspan(bins[sample][0], mn, color='r', alpha=0.2)
+            plt.axvspan(mx, bins[sample][-1], color='r', alpha=0.2)
+            ax.set_xlabel(sample)
+        plt.savefig(output.ind_dp_hist_pdf, bbox_inches='tight')
+        plt.savefig(output.ind_dp_hist_svg, bbox_inches='tight')
+
+rule plot_site_filter_stats:
+    """
+    Plots filter statistic distributions with 
+    site filter threshold.
+    And creates a dynamic site filters to translate
+    relative filters into absolute values. 
+    """
+    input:
+        stat_hists = ['results/VariantCalling/{}_{}/filter_{{ind_filter_id}}/stat_hists.{{ind_filter_id}}.chr{}.{}.yaml'.format(config['callset']['id'], config['ref']['name'], chrom, chunk) \
+                            for chrom in CHROMOSOMES for chunk in get_chunks(chrom)]
+    output:
+        #dynamic_filter_config = f'{ana_dir}/_data/{{ref_name}}/{{callset_id}}/stat_hists.{{ind_filter_id}}.{{site_filter_id}}.yaml',
+        stat_hist_pdf = 'results/VariantCalling/{}_{}/plots/stat_hists.{{ind_filter_id}}.{{site_filter_id}}.pdf'.format(config['callset']['id'], config['ref']['name'])
+        #stat_hist_svg = 'results/VariantCalling/{}_{}/plots/stat_hists.{{ind_filter_id}}.{{site_filter_id}}.svg'.format(config['callset']['id'], config['ref']['name'])
+    params:
+        filters = lambda wildcards: config['site_filter_sets'][wildcards.site_filter_id],
+    run:
+        ##
+        with open(input.stat_hists[0]) as f:
+            sd = yaml.safe_load(f)
+            bins = {s:v['bins'] for s,v in sd.items()}
+            hists = {s:np.array(v['hists']).astype(int) for s,v in sd.items()}
+        for fn in input.stat_hists[1:]:
+            with open(fn) as f:
+                sd = yaml.safe_load(f)
+                bins1 = {s: v['bins'] for s, v in sd.items()}
+                hists1 = {s: np.array(v['hists']).astype(int) for s, v in sd.items()}
+                assert bins1 == bins
+                for s,h in hists1.items():
+                    hists[s] += h
+
+        bins = {s:np.array(v) for s,v in bins.items()}
+        n_rows = int(np.ceil(len(params.filters) / 2))
+        fig = plt.figure(figsize=(16,5*n_rows))
+
+        for i, (filter_name, fdic) in enumerate(params.filters.items()):
+            ax = fig.add_subplot(n_rows, 2, i+1)
+            k = fdic['tag']
+            try:
+                h = hists[k]
+            except KeyError as e:
+                print("No tag data recorded for filter in config {filter_name} with tag {k}."
+                      "You need add this to the bin dict in rule get_filter_stats.")
+            plt.bar(bins[k][:-1],h, width=bins[k][1:] - bins[k][:-1], align='edge')
+
+            assert fdic['threshold_type'] == 'absolute', 'relative threshold not yet implemented'
+            if fdic['operator'] == '>':
+                mn1 = fdic['threshold']
+                mx1 = bins[k][-1]
+                #pct_filtered = 100 * (ss > threshold).mean()
+            elif fdic['operator'] == '<':
+                mn1 = bins[k][0]
+                mx1 = fdic['threshold']
+                #pct_filtered = 100 * (ss < threshold).mean()
+            else:
+                raise ValueError("Only < and > operators implemented for filters.")
+            plt.axvspan(mn1, mx1, color='r', alpha=0.2)
+            ax.set_xlabel(k)
+            ax.set_title(filter_name)
+        plt.savefig(output.stat_hist_pdf, bbox_inches='tight')
+        #plt.savefig(output.stat_hist_svg, bbox_inches='tight')
+
+######################## apply filters ################################### 
+
+def get_filter_command(wildcards):
+    commands = []
+    filters = config['site_filter_sets'][wildcards.site_filter_id]['filters']
+    for i, (filter_name, fd) in enumerate(filters.items()):
+        assert fd['threshold_type'] == 'absolute', (
+                "At this point filter thresholds need to be absolute. Relative thresholds currently not supported.")
+        commands.append(
+                f"bcftools filter --soft-filter {filter_name} --mode + -O u --exclude '{fd['tag']} {fd['operator']} {fd['threshold']}' ")
+    #-O u: output-type uncompressed BCF
+    #--mode +: append (instead of overwrite (x)) filters
+
+    return (" | ".join(commands))
+
+rule vcf_add_filters:
+    input:
+        bcf = 'results/VariantCalling/{}_{}/bcf_filter_{{ind_filter_id}}/all_sites.{{ind_filter_id}}.chr{{chrom}}.{{chunk}}.bcf'.format(config['callset']['id'], config['ref']['name'])
+        #bcf = ana_dir + '/_data/' + "{ref_name}/{callset_id}/all_sites.{ind_filter_id}.{chrom}.{chunk}.bcf",
+    output:
+        bcf = 'results/VariantCalling/{}_{}/bcf_filter_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.chr{{chrom}}.{{chunk}}.bcf'.format(config['callset']['id'], config['ref']['name']),
+        #bcf = ana_dir + '/_data/' + "{ref_name}/{callset_id}/all_sites.{ind_filter_id}.{site_filter_id}.{chrom}.{chunk}.bcf",
+    params:
+        filter_command = get_filter_command
+    shell:
+        """
+        bcftools view -O u {input.bcf} | \
+        {params.filter_command} | \
+        bcftools view -O b > {output.bcf}
+        """
+
+rule get_filter_info:
+    input:
+        bcf = 'results/VariantCalling/{}_{}/bcf_filter_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.chr{{chrom}}.{{chunk}}.bcf'.format(config['callset']['id'], config['ref']['name'])
+        #bcf = ana_dir + '/_data/' + "{ref_name}/{callset_id}/all_sites.{ind_filter_id}.{site_filter_id}.{chrom}.{chunk}.bcf",
+    output:
+        #filter_info = temp('results/VariantCalling/{}_{}/bcf_filter_tif1_sft1/'.format(config['callset']['id'], config['ref']['name']) + 'all_sites.tif1.sft1.chr{chrom}.{chunk}.filters.info')
+        filter_info = 'results/VariantCalling/{}_{}/bcf_filter_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.chr{{chrom}}.{{chunk}}.filters.info'.format(config['callset']['id'], config['ref']['name'])
+        #filter_info = temp('results/VariantCalling/{}_{}/bcf_filter_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.chr{{chrom}}.{{chunk}}.filters.info'.format(config['callset']['id'], config['ref']['name']))
+        #filter_info = temp(ana_dir + '/_data/' + "{ref_name}/{callset_id}/all_sites.{ind_filter_id}.{site_filter_id}.{chrom}.{chunk}.filters.info"),
+    shell:
+        ("""bcftools query --include 'FILTER != "PASS"' """
+        "  --format '%CHROM\\t%POS\\t%POS\\t%FILTER\\n' {input.bcf} "
+        """ | awk 'BEGIN{{OFS="\t"}} {{print $1,$2,$4}}' > {output.filter_info}  """)
+
+rule merge_all_sites_bcf:
+    input:
+        bcfs = lambda wildcards: expand('results/VariantCalling/{}_{}/bcf_filter_tif1_sft1/'.format(config['callset']['id'], config['ref']['name']) + 'all_sites.tif1.sft1.chr{{chrom}}.{chunk}.bcf', chunk=get_chunks(wildcards.chrom)),
+        #bcfs = lambda wildcards: expand('results/VariantCalling/{}_{}/bcf_filter_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.chr{{chrom}}.{}.bcf'.format(config['callset']['id'], config['ref']['name'], get_chunks(wildcards.chrom)), site_filter_id=site_filter_id, ind_filter_id=ind_filter_id, chrom = CHROMOSOMES)
+        #bcfs = lambda wildcards: expand(ana_dir + '/_data/' + "{{ref_name}}/{{callset_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.{{chrom}}.{chunk}.bcf",
+        #            chunk=get_chunks(wildcards.chrom)),
+    output:
+        bcf = 'results/VariantCalling/{}_{}/bcf_filter_tif1_sft1/all_sites.tif1.sft1.all_sites.chr{{chrom}}.bcf'.format(config['callset']['id'], config['ref']['name']),
+        bcf_ix = 'results/VariantCalling/{}_{}/bcf_filter_tif1_sft1/all_sites.tif1.sft1.all_sites.chr{{chrom}}.bcf.csi'.format(config['callset']['id'], config['ref']['name'])
+        #bcf = ana_dir + '/_data/' + "{ref_name}/{callset_id}/all_sites.{ind_filter_id}.{site_filter_id}.variants.{chrom}.bcf",
+        #bcf_ix = ana_dir + '/_data/' + "{ref_name}/{callset_id}/all_sites.{ind_filter_id}.{site_filter_id}.variants.{chrom}.bcf.csi",
+    shell:
+        """
+        bcftools concat -n -Ou {input.bcfs} | bcftools view -Ob > {output.bcf};
+        bcftools index -f {output.bcf}
+        """
+
+rule select_biallelic_pass_snps_ALL_SITES:
+    input:
+        bcf = 'results/VariantCalling/{}_{}/bcf_filter_tif1_sft1/all_sites.tif1.sft1.all_sites.chr{{chrom}}.bcf'.format(config['callset']['id'], config['ref']['name']),
+    output:
+        vcf = 'results/VariantCalling/{}_{}/bcf_filter_tif1_sft1/all_sites.tif1.sft1.all_sites.chr{{chrom}}.pass.snps.biallelic.vcf.gz'.format(config['callset']['id'], config['ref']['name']),
+        index1 = 'results/VariantCalling/{}_{}/bcf_filter_tif1_sft1/all_sites.tif1.sft1.all_sites.chr{{chrom}}.pass.snps.biallelic.vcf.gz.tbi'.format(config['callset']['id'], config['ref']['name']),
+        index2 = 'results/VariantCalling/{}_{}/bcf_filter_tif1_sft1/all_sites.tif1.sft1.all_sites.chr{{chrom}}.pass.snps.biallelic.vcf.gz.csi'.format(config['callset']['id'], config['ref']['name'])
+#
+#        index1 = 'results/VariantCalling/{}_{}/bcf_filter_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.pass.snps.biallelic.{{chrom}}.bcf.tbi'.format(config['callset']['id'], config['ref']['name']),
+#        index2 = 'results/VariantCalling/{}_{}/bcf_filter_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.pass.snps.biallelic.{{chrom}}.bcf.csi'.format(config['callset']['id'], config['ref']['name'])
+    params:
+        tmp = "{chrom}.tmp"
+    shell:
+        """
+        bcftools view \
+            --max-alleles 2 \
+            --apply-filters PASS \
+            {input.bcf} > {params.tmp};
+        grep -v 'INDEL' {params.tmp} | bcftools view -Oz > {output.vcf}
+        rm -rf {params.tmp}
+        bcftools index -f {output.vcf};
+        bcftools index --tbi -f {output.vcf}
+        """
+
+
+rule select_biallelic_pass_snps_indels_ALL_SITES:
+    input:
+        bcf = 'results/VariantCalling/{}_{}/bcf_filter_tif1_sft1/all_sites.tif1.sft1.all_sites.chr{{chrom}}.bcf'.format(config['callset']['id'], config['ref']['name']),
+    output:
+        vcf = 'results/VariantCalling/{}_{}/bcf_filter_tif1_sft1/all_sites.tif1.sft1.all_sites.chr{{chrom}}.pass.snps_indels.biallelic.vcf.gz'.format(config['callset']['id'], config['ref']['name']),
+        index1 = 'results/VariantCalling/{}_{}/bcf_filter_tif1_sft1/all_sites.tif1.sft1.all_sites.chr{{chrom}}.pass.snps_indels.biallelic.vcf.gz.tbi'.format(config['callset']['id'], config['ref']['name']),
+        index2 = 'results/VariantCalling/{}_{}/bcf_filter_tif1_sft1/all_sites.tif1.sft1.all_sites.chr{{chrom}}.pass.snps_indels.biallelic.vcf.gz.csi'.format(config['callset']['id'], config['ref']['name'])
+#
+#        index1 = 'results/VariantCalling/{}_{}/bcf_filter_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.pass.snps.biallelic.{{chrom}}.bcf.tbi'.format(config['callset']['id'], config['ref']['name']),
+#        index2 = 'results/VariantCalling/{}_{}/bcf_filter_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.pass.snps.biallelic.{{chrom}}.bcf.csi'.format(config['callset']['id'], config['ref']['name'])
+    shell:
+        """
+        bcftools view \
+            -Oz \
+            --max-alleles 2 \
+            --apply-filters PASS \
+            {input.bcf} > {output.vcf};
+        bcftools index -f {output.vcf};
+        bcftools index --tbi -f {output.vcf}
+        """
+
+
+
+rule get_variant_bcf:
+    input:
+        bcfs = lambda wildcards: expand('results/VariantCalling/{}_{}/bcf_filter_tif1_sft1/'.format(config['callset']['id'], config['ref']['name']) + 'all_sites.tif1.sft1.chr{{chrom}}.{chunk}.bcf', chunk=get_chunks(wildcards.chrom)),
+        #bcfs = lambda wildcards: expand('results/VariantCalling/{}_{}/bcf_filter_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.chr{{chrom}}.{}.bcf'.format(config['callset']['id'], config['ref']['name'], get_chunks(wildcards.chrom)), site_filter_id=site_filter_id, ind_filter_id=ind_filter_id, chrom = CHROMOSOMES)
+        #bcfs = lambda wildcards: expand(ana_dir + '/_data/' + "{{ref_name}}/{{callset_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.{{chrom}}.{chunk}.bcf",
+        #            chunk=get_chunks(wildcards.chrom)),
+    output:
+        bcf = 'results/VariantCalling/{}_{}/bcf_filter_tif1_sft1/all_sites.tif1.sft1.variants.chr{{chrom}}.bcf'.format(config['callset']['id'], config['ref']['name']),
+        bcf_ix = 'results/VariantCalling/{}_{}/bcf_filter_tif1_sft1/all_sites.tif1.sft1.variants.chr{{chrom}}.bcf.csi'.format(config['callset']['id'], config['ref']['name'])
+        #bcf = ana_dir + '/_data/' + "{ref_name}/{callset_id}/all_sites.{ind_filter_id}.{site_filter_id}.variants.{chrom}.bcf",
+        #bcf_ix = ana_dir + '/_data/' + "{ref_name}/{callset_id}/all_sites.{ind_filter_id}.{site_filter_id}.variants.{chrom}.bcf.csi",
+    shell:
+        """
+        bcftools concat -n -Ou {input.bcfs} | bcftools view -Ob --exclude 'ALT = "."'   > {output.bcf};
+        bcftools index -f {output.bcf}
+        """
+
+
+
+rule merge_chrom_filter_files:
+    input:
+        filter_infos = lambda wildcards: expand('results/VariantCalling/{}_{}/bcf_filter_tif1_sft1/'.format(config['callset']['id'], config['ref']['name']) + 'all_sites.tif1.sft1.chr{{chrom}}.{chunk}.filters.info', chunk=get_chunks(wildcards.chrom))
+    output:
+        filter_info = 'results/VariantCalling/{}_{}/bcf_filter_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.chr{{chrom}}.filters.info.gz'.format(config['callset']['id'], config['ref']['name']),
+        filter_bed = 'results/VariantCalling/{}_{}/bcf_filter_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.chr{{chrom}}.filters.bed.gz'.format(config['callset']['id'], config['ref']['name']),
+        filter_info_ix = 'results/VariantCalling/{}_{}/bcf_filter_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.chr{{chrom}}.filters.info.gz.tbi'.format(config['callset']['id'], config['ref']['name']),
+        filter_bed_ix = 'results/VariantCalling/{}_{}/bcf_filter_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.chr{{chrom}}.filters.bed.gz.tbi'.format(config['callset']['id'], config['ref']['name'])
+    params:
+        merge_dist=lambda wildcards: config['site_filter_sets'][wildcards.site_filter_id]["merge_dist"]
+    shell:
+        """
+        cat {input.filter_infos} | tee >(bgzip -c > {output.filter_info}) \
+            | awk  'BEGIN{{OFS="\\t"}} {{print $1,$2-1,$2}}' \
+            | bedtools merge -d {params.merge_dist} | bgzip -c  >  {output.filter_bed}; 
+             tabix -s 1 -b 2 {output.filter_info}; 
+              tabix -p bed {output.filter_bed};
+        """
+
+rule select_biallelic_pass_snps:
+    input:
+        bcf = 'results/VariantCalling/{}_{}/bcf_filter_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.variants.chr{{chrom}}.bcf'.format(config['callset']['id'], config['ref']['name'])
+    output:
+        vcf = 'results/VariantCalling/{}_{}/bcf_filter_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.pass.snps.biallelic.{{chrom}}.bcf'.format(config['callset']['id'], config['ref']['name']),
+        index1 = 'results/VariantCalling/{}_{}/bcf_filter_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.pass.snps.biallelic.{{chrom}}.bcf.tbi'.format(config['callset']['id'], config['ref']['name']),
+        index2 = 'results/VariantCalling/{}_{}/bcf_filter_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.pass.snps.biallelic.{{chrom}}.bcf.csi'.format(config['callset']['id'], config['ref']['name'])
+    shell:
+        """
+        bcftools view \
+            -Oz \
+            --max-alleles 2 \
+            --types snps \
+            --apply-filters PASS \
+            {input.bcf} > {output.vcf};
+         bcftools index -f {output.vcf};
+         bcftools index --tbi -f {output.vcf}
+         """
+
+rule select_biallelic_pass_indels:
+    input:
+        bcf = 'results/VariantCalling/{}_{}/bcf_filter_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.variants.chr{{chrom}}.bcf'.format(config['callset']['id'], config['ref']['name'])
+    output:
+        vcf = 'results/VariantCalling/{}_{}/bcf_filter_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.pass.indels.biallelic.{{chrom}}.bcf'.format(config['callset']['id'], config['ref']['name']),
+        index1 = 'results/VariantCalling/{}_{}/bcf_filter_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.pass.indels.biallelic.{{chrom}}.bcf.tbi'.format(config['callset']['id'], config['ref']['name']),
+        index2 = 'results/VariantCalling/{}_{}/bcf_filter_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.pass.indels.biallelic.{{chrom}}.bcf.csi'.format(config['callset']['id'], config['ref']['name'])
+    shell:
+        """
+        bcftools view \
+            -Oz \
+            --max-alleles 2 \
+            --types indels \
+            --apply-filters PASS \
+            {input.bcf} > {output.vcf};
+         bcftools index -f {output.vcf};
+         bcftools index --tbi -f {output.vcf}
+         """
+
+### phasing ######
+
+
+def get_bam(sample):
+    return sample_mt.loc[sample, "calcua_alignment_location"]
+
+rule phase_whatshap:
+    input:
+        vcf = "results/VariantCalling/202103GouaniaGenomics_GCF_900634775.1_fGouWil2.1/bcf_filter_tif1_sft1/all_sites.tif1.sft1.all_sites.chr{chrom}.bcf",
+        vcf_ix = "results/VariantCalling/202103GouaniaGenomics_GCF_900634775.1_fGouWil2.1/bcf_filter_tif1_sft1/all_sites.tif1.sft1.all_sites.chr{chrom}.bcf.csi",
+        #vcf = 'results/VariantCalling/{}_{}/bcf_filter_tif1_sft1/all_sites.tif1.sft1.all_sites.chr{{chrom}}.bcf'.format(config['callset']['id'], config['ref']['name']),
+        #vcf_ix = 'results/VariantCalling/{}_{}/bcf_filter_tif1_sft1/all_sites.tif1.sft1.all_sites.chr{{chrom}}.bcf.csi'.format(config['callset']['id'], config['ref']['name']),
+        #vcf = 'results/VariantCalling/{}_{}/bcf_filter_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.{{vcf_type}}.chr{{chrom}}.bcf'.format(config['callset']['id'], config['ref']['name']),
+        #vcf_ix = 'results/VariantCalling/{}_{}/bcf_filter_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.{{vcf_type}}.chr{{chrom}}.bcf.csi'.format(config['callset']['id'], config['ref']['name']),
+        #vcf = ana_dir + '/_data/' + "{ref_name}/{callset_id}/all_sites.{ind_filter_id}.{site_filter_id}.{vcf_type}.{chrom}.bcf",
+        #vcf_ix = ana_dir + '/_data/' + "{ref_name}/{callset_id}/all_sites.{ind_filter_id}.{site_filter_id}.{vcf_type}.{chrom}.bcf.csi",
+        bam = lambda wildcards: get_bam(wildcards.seqrunID),
+        ref = config['ref']['base_fn'] + config['ref']['ext_fa'],
+        #ref = ref_base + ref_ext
+    output:
+        #bcf = 'results/VariantCalling/{}_{}/phasing_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.{{vcf_type}}.whatshap.chr{{chrom}}.{{seqrunID}}.bcf'.format(config['callset']['id'], config['ref']['name']),
+        #csi = 'results/VariantCalling/{}_{}/phasing_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.{{vcf_type}}.whatshap.chr{{chrom}}.{{seqrunID}}.bcf.csi'.format(config['callset']['id'], config['ref']['name'])
+        bcf = temp('results/VariantCalling/{}_{}/phasing_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.{{vcf_type}}.whatshap.chr{{chrom}}.{{seqrunID}}.bcf'.format(config['callset']['id'], config['ref']['name'])),
+        csi = temp('results/VariantCalling/{}_{}/phasing_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.{{vcf_type}}.whatshap.chr{{chrom}}.{{seqrunID}}.bcf.csi'.format(config['callset']['id'], config['ref']['name'])),
+    conda:
+        "envs/phasing_env_2.yaml"
+    threads: 1
+    resources:
+        mem_gb = lambda wildcards, attempt: int(np.sqrt(attempt) * 18),
+        walltime = lambda wildcards, attempt: attempt
+    params:
+        tmp_vcf = lambda wildcards, output: output.bcf.rsplit('.',1)[0] + '.tmp.vcf'
+    shell:
+        """
+        echo 'environment loaded' 
+        bcftools view --samples {wildcards.seqrunID} --regions {wildcards.chrom} {input.vcf} > {params.tmp_vcf}; 
+        whatshap phase --tag PS --reference={input.ref} {params.tmp_vcf} {input.bam} | bcftools view -Ob > {output.bcf}
+        echo 'bcftools view finished'
+        rm {params.tmp_vcf};
+        bcftools index -f {output.bcf}
+        """
+
+rule combine_whatshap:
+    #group: "whatshap"
+    input:
+        #bcfs = expand('results/VariantCalling/{}_{}/phasing_tif1_sft1/all_sites.tif1.sft1.variants.whatshap.chr{{chrom}}.{{sample_id}}.bcf'.format(config['callset']['id'], config['ref']['name']), sample_id=samples),
+        #indices = expand('results/VariantCalling/{}_{}/phasing_tif1_sft1/all_sites.tif1.ftp1.variants.whatshap.chr{{chrom}}.{{sample_id}}.bcf.csi'.format(config['callset']['id'], config['ref']['name']), sample_id=samples)
+        bcfs = expand('results/VariantCalling/{}_{}/'.format(config['callset']['id'], config['ref']['name']) +'phasing_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.{{vcf_type}}.whatshap.chr{{chrom}}.{seqrunID}.bcf', seqrunID=samples, ind_filter_id=ind_filter_id, site_filter_id=site_filter_id, vcf_type=["all_sites"]),
+        #bcfs = expand(ana_dir + '/_data/' + "{{ref_name}}/{{callset_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.{{vcf_type}}.whatshap.{{chrom}}.{sample_id}.bcf",
+                      #sample_id=SAMPLES),
+        indices = expand('results/VariantCalling/{}_{}/'.format(config['callset']['id'], config['ref']['name']) + 'phasing_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.{{vcf_type}}.whatshap.chr{{chrom}}.{seqrunID}.bcf.csi', seqrunID=samples, ind_filter_id=ind_filter_id, site_filter_id=site_filter_id, vcf_type=["all_sites"])
+        #indices = expand(ana_dir + '/_data/' + "{{ref_name}}/{{callset_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.{{vcf_type}}.whatshap.{{chrom}}.{sample_id}.bcf.csi",
+        #              sample_id=SAMPLES)
+    output:
+        bcf = 'results/VariantCalling/{}_{}/phasing_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.{{vcf_type}}.whatshap.chr{{chrom}}.bcf'.format(config['callset']['id'], config['ref']['name']),
+        index = 'results/VariantCalling/{}_{}/phasing_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.{{vcf_type}}.whatshap.chr{{chrom}}.bcf.csi'.format(config['callset']['id'], config['ref']['name'])
+        #bcf = ana_dir + '/_data/' + "{ref_name}/{callset_id}/all_sites.{ind_filter_id}.{site_filter_id}.{vcf_type}.whatshap.{chrom}.bcf",
+        #index = ana_dir + '/_data/' + "{ref_name}/{callset_id}/all_sites.{ind_filter_id}.{site_filter_id}.{vcf_type}.whatshap.{chrom}.bcf.csi"
+    threads: 1
+    resources:
+        mem_gb=4, #lambda wildcards, threads: threads*4,
+        walltime=1
+    shell:
+        ("bcftools merge -Ob  --info-rules '-' {input.bcfs} > {output.bcf} ; "
+        " bcftools index -f {output.bcf}")
+
+
+######################## phasing shapeit4 ###################################
+
+rule phase_shapeit:
+    input:
+        bcf = 'results/VariantCalling/{}_{}/phasing_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.{{vcf_type}}.whatshap.chr{{chrom}}.bcf'.format(config['callset']['id'], config['ref']['name']),
+        index = 'results/VariantCalling/{}_{}/phasing_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.{{vcf_type}}.whatshap.chr{{chrom}}.bcf.csi'.format(config['callset']['id'], config['ref']['name'])
+        #bcf = ana_dir + '/_data/' + "{ref_name}/{callset_id}/all_sites.{ind_filter_id}.{site_filter_id}.{vcf_type}.whatshap.{chrom}.bcf",
+        #index = ana_dir + '/_data/' + "{ref_name}/{callset_id}/all_sites.{ind_filter_id}.{site_filter_id}.{vcf_type}.whatshap.{chrom}.bcf.csi",
+    output:
+        bcf = 'results/VariantCalling/{}_{}/phasing_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.{{vcf_type}}.whatshap.shapeit4.chr{{chrom}}.bcf'.format(config['callset']['id'], config['ref']['name']),
+        index = 'results/VariantCalling/{}_{}/phasing_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.{{vcf_type}}.whatshap.shapeit4.chr{{chrom}}.bcf.csi'.format(config['callset']['id'], config['ref']['name'])
+        #bcf = ana_dir + '/_data/' + "{ref_name}/{callset_id}/all_sites.{ind_filter_id}.{site_filter_id}.{vcf_type}.whatshap.shapeit4.{chrom}.bcf",
+        #index = ana_dir + '/_data/' + "{ref_name}/{callset_id}/all_sites.{ind_filter_id}.{site_filter_id}.{vcf_type}.whatshap.shapeit4.{chrom}.bcf.csi"
+    threads: 7
+    resources:
+        mem_gb=lambda wildcards, threads: threads*4,
+        walltime=4
+    conda:
+        "envs/phasing_env_2.yaml"
+    shell:
+        """
+        shapeit4 --thread {threads} --use-PS 0.0001 --region {wildcards.chrom} --input {input.bcf}  --output {output.bcf} --sequencing  
+        bcftools index -f --threads {threads} {output.bcf}
+        """
+
+
+######################## annotate phasing ###################################
+
+rule annotate_phase_vcf:
+    input:
+        phase_vcf = 'results/VariantCalling/{}_{}/phasing_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.{{vcf_type}}.whatshap.shapeit4.chr{{chrom}}.bcf'.format(config['callset']['id'], config['ref']['name']),
+        vcf = 'results/VariantCalling/{}_{}/phasing_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.{{vcf_type}}.whatshap.chr{{chrom}}.bcf'.format(config['callset']['id'], config['ref']['name']),
+        vcf_ix = 'results/VariantCalling/{}_{}/phasing_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.{{vcf_type}}.whatshap.chr{{chrom}}.bcf.csi'.format(config['callset']['id'], config['ref']['name'])
+        #phase_vcf = ana_dir + '/_data/' + "{ref_name}/{callset_id}/all_sites.{ind_filter_id}.{site_filter_id}.{vcf_type}.whatshap.shapeit4.{chrom}.bcf",
+        #vcf = ana_dir + '/_data/' + "{ref_name}/{callset_id}/all_sites.{ind_filter_id}.{site_filter_id}.{vcf_type}.whatshap.{chrom}.bcf",
+        #vcf_ix = ana_dir+ '/_data/' + "{ref_name}/{callset_id}/all_sites.{ind_filter_id}.{site_filter_id}.{vcf_type}.whatshap.{chrom}.bcf.csi"
+    output:
+        vcf = 'results/VariantCalling/{}_{}/phasing_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.{{vcf_type}}.whatshap.shapeit4.annotate.chr{{chrom}}.vcf.gz'.format(config['callset']['id'], config['ref']['name']),
+        index1 = 'results/VariantCalling/{}_{}/phasing_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.{{vcf_type}}.whatshap.shapeit4.annotate.chr{{chrom}}.vcf.gz.csi'.format(config['callset']['id'], config['ref']['name']),
+        index2 = 'results/VariantCalling/{}_{}/phasing_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.{{vcf_type}}.whatshap.shapeit4.annotate.chr{{chrom}}.vcf.gz.tbi'.format(config['callset']['id'], config['ref']['name']),
+        #vcf = ana_dir + '/_data/' + "{ref_name}/{callset_id}/all_sites.{ind_filter_id}.{site_filter_id}.{vcf_type}.whatshap.shapeit4.annotate.{chrom}.vcf.gz",
+        #index1 = ana_dir + '/_data/' + "{ref_name}/{callset_id}/all_sites.{ind_filter_id}.{site_filter_id}.{vcf_type}.whatshap.shapeit4.annotate.{chrom}.vcf.gz.csi",
+        #index2 = ana_dir + '/_data/' + "{ref_name}/{callset_id}/all_sites.{ind_filter_id}.{site_filter_id}.{vcf_type}.whatshap.shapeit4.annotate.{chrom}.vcf.gz.tbi",
+    resources:
+        walltime=1
+    shell:
+        """
+        bcftools annotate -c INFO,FORMAT,FILTER -a {input.phase_vcf} {input.vcf} | bcftools +fill-AN-AC -O z > {output.vcf}
+        bcftools index -f {output.vcf}
+        bcftools index -f --tbi {output.vcf}
+        """
+
+
+rule select_phased_biallelic_pass_snps:
+    input:
+        vcf = 'results/VariantCalling/{}_{}/phasing_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.{{vcf_type}}.whatshap.shapeit4.annotate.chr{{chrom}}.vcf.gz'.format(config['callset']['id'], config['ref']['name'])
+        #bcf = 'results/VariantCalling/{}_{}/bcf_filter_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.variants.chr{{chrom}}.bcf'.format(config['callset']['id'], config['ref']['name'])
+    output:
+        vcf = 'results/VariantCalling/{}_{}/phasing_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.{{vcf_type}}.whatshap.shapeit4.annotate.pass.snps.biallelic.chr{{chrom}}.vcf.gz'.format(config['callset']['id'], config['ref']['name']),
+        index1 = 'results/VariantCalling/{}_{}/phasing_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.{{vcf_type}}.whatshap.shapeit4.annotate.pass.snps.biallelic.chr{{chrom}}.vcf.gz.tbi'.format(config['callset']['id'], config['ref']['name']),
+        indexi2 = 'results/VariantCalling/{}_{}/phasing_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.{{vcf_type}}.whatshap.shapeit4.annotate.pass.snps.biallelic.chr{{chrom}}.vcf.gz.csi'.format(config['callset']['id'], config['ref']['name']),
+        #vcf = 'results/VariantCalling/{}_{}/bcf_filter_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.pass.snps.biallelic.{{chrom}}.bcf'.format(config['callset']['id'], config['ref']['name']),
+        #index1 = 'results/VariantCalling/{}_{}/bcf_filter_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.pass.snps.biallelic.{{chrom}}.bcf.tbi'.format(config['callset']['id'], config['ref']['name']),
+        #index2 = 'results/VariantCalling/{}_{}/bcf_filter_{{ind_filter_id}}_{{site_filter_id}}/all_sites.{{ind_filter_id}}.{{site_filter_id}}.pass.snps.biallelic.{{chrom}}.bcf.csi'.format(config['callset']['id'], config['ref']['name'])
+    shell:
+        """
+        bcftools view \
+            -Oz \
+            --max-alleles 2 \
+            --types snps \
+            --apply-filters PASS \
+            {input.vcf} > {output.vcf};
+         bcftools index -f {output.vcf};
+         bcftools index --tbi -f {output.vcf}
+         """
+

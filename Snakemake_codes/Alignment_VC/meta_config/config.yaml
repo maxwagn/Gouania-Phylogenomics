@@ -1,0 +1,74 @@
+# GOUANIA PHYLOGENOMICS CONFIG.YAML
+# original-template file: /scratch/antwerpen/grp/asvardal/projects/anabantoid/analyses/BettaGenomics/snakemake/VariantCalling
+# This file should contain everything to configure the workflow on a global scale.
+# In case of sample based data, it should be complemented by a samples.tsv file that contains
+# one row per sample. It can be parsed easily via pandas.
+#
+
+sample_mt: /scratch/antwerpen/grp/asvardal/projects/clingfishes/projects/GouaniaPhylogenomics/snakemake/VariantCalling/meta_config/Gouania_Genomics_meta_2021-03-17.tsv
+
+ana_dir: /scratch/antwerpen/grp/asvardal/projects/clingfishes/projects/GouaniaPhylogenomics/analyses
+
+callset:
+  id: 202103GouaniaGenomics
+
+ref:
+  species: "Gouania adriatica"
+  name: GCF_900634775.1_fGouWil2.1
+  base_fn: /scratch/antwerpen/grp/asvardal/projects/clingfishes/projects/GouaniaPhylogenomics/snakemake/VariantCalling/data/reference/GCF_900634775.1_fGouWil2.1_genomic_chromnames
+  ext_fa: .fna
+  ext_fai: .fna.fai
+
+individual_filter_sets:
+    tif1:
+        ab_test_thresh: 0.01
+        min_GQ: 10
+        max_dp_to_missing_pval: 1.0e-2
+        min_dp_to_missing_pval: 0
+
+
+site_filter_sets:
+    sft1:
+        merge_dist: 10
+        filters:
+            LowMQ:
+                #expression: "MQ < 50.0"
+                #description: "Root mean square MQ < 30"
+                tag: 'MQ'
+                threshold: 50.0
+                threshold_type: 'absolute'
+                operator: '<'
+            ExcessMQ0:
+                #expression: "MQ0F > 0.15"
+                #description: "Fraction of MQ0 reads > 0.10"
+                tag: 'MQ0F'
+                threshold: 0.1
+                threshold_type: 'absolute'
+                operator: '>'
+            StrandBias:
+                #expression: "MQSB < 1e-10"
+                tag: 'MQSB'
+                threshold: 1.0e-3
+                threshold_type: 'absolute'
+                operator: '<'
+                description: "Highly significant Mann-Whitney U test of Mapping Quality vs Strand Bias."
+            ExcessHet:
+                tag: 'ExcHetOrig'
+                threshold: 0.2
+                threshold_type: 'absolute'
+                operator: '<'
+            AlleleBalance:
+                tag: 'AB_Het'
+                threshold: 20
+                threshold_type: 'absolute'
+                operator: '>'
+            DepthDeviation:
+                tag: 'DD'
+                threshold: 2
+                threshold_type: 'absolute'
+                operator: '>'
+            ExcessMissing:
+                tag: 'MF'
+                threshold: 0.2
+                threshold_type: 'absolute'
+                operator: '>'

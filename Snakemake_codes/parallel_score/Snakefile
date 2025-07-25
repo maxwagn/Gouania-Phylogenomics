@@ -1,0 +1,126 @@
+import pandas as pd
+#import vcf  # run in hscon3
+import allel
+import numpy as np
+import gzip
+
+CHROMOSOMES = [str(i) for i in range(1,25) if i not in [23]]
+reference = "fGouWil2.1.99"
+VCF_TYPE = ["variants", "all_sites"]
+SPECIES = ["adriatica","pigra","willdenowi","orientalis","hofrichteri"]
+
+configfile:"../VariantCalling/meta_config/config.yaml"
+
+sample_mt = pd.read_csv(config["sample_mt"],
+                        dtype=str, sep='\t').set_index("sample_ID", drop=False)
+
+chrom_length = pd.read_csv(config['ref']['base_fn'] + config['ref']['ext_fai'],
+                           sep='\t',usecols=[0,1],names=['chrom','len'],index_col=0,
+                           squeeze=True)
+phase_dir = "/scratch/antwerpen/grp/asvardal/projects/clingfishes/projects/GouaniaPhylogenomics/snakemake/VariantCalling/results/VariantCalling/202103GouaniaGenomics_GCF_900634775.1_fGouWil2.1/phasing_tif1_sft1"
+
+DIRECTION = ["FORWARD", "REVERSE"]
+SPECIES_PAIRS = ["hofrichteri_orientalis","hofrichteri_pigra","hofrichteri_willdenowi","hofrichteri_adriatica","orientalis_pigra","orientalis_willdenowi","orientalis_adriatica","pigra_willdenowi","pigra_adriatica","willdenowi_adriatica"]
+
+
+rule all:
+    input:
+        expand("input_files/CDS_alignments/unphased/checkpoints/cds_{vcf_type}_chrom{chrom}.done", chrom = CHROMOSOMES[1], vcf_type = "variants")
+
+
+
+
+rule species_AF_variants:
+    input:
+        vcf = "../add_geneAnnotation/annotation/indels/all_sites.tif1.sft1.pass.indels.biallelic.chr{chrom}.annSNPEFf.vcf.gz",
+        #vcf = "../add_geneAnnotation/annotation/{vcf_type}/all_sites.tif1.sft1.{vcf_type}.whatshap.shapeit4.annotate.pass.snps.biallelic.chr{chrom}.annSNPEFF.vcf.gz",
+        popinfo = "input_files/pop_info.txt" 
+    output:
+        #"AF_test_{vcf_type}_{chrom}.tsv.gz"
+        "results/indels_AF/AF_all_sites.tif1.sft1.pass.indels.biallelic.chr{chrom}.annSNPEFf.tsv.gz"
+        #"results/snps_AF/{vcf_type}/AF_all_sites.tif1.sft1.{vcf_type}.whatshap.shapeit4.annotate.pass.snps.biallelic.chr{chrom}.annSNPEFF.tsv.gz"
+    params:
+        header = "CHROM\tPOS\tREF\tALT\tANN" + "".join(["\tAF_{}".format(i) for i in SPECIES]),
+        spec_AF = "".join(["\t%INFO/AF_{}".format(i) for i in SPECIES])
+        #outfh = "AF_test_{vcf_type}_{chrom}.tsv"
+    shell: 
+        """
+        (echo -e '{params.header}'; bcftools view {input.vcf} | bcftools +fill-tags -Oz -- -S {input.popinfo} -t AF | bcftools query -f '%CHROM\t%POS\t%REF\t%ALT\t%INFO/ANN{params.spec_AF}\n') | bgzip -c > {output}
+        """
+
+rule get_parallel_score:
+    input:
+        indels = "results/indels_AF/AF_all_sites.tif1.sft1.pass.indels.biallelic.chr{chrom}.annSNPEFf.tsv.gz",
+        snps = "results/snps_AF/variants/AF_all_sites.tif1.sft1.variants.whatshap.shapeit4.annotate.pass.snps.biallelic.chr{chrom}.annSNPEFF.tsv.gz"
+    output:
+        pair1_snps ="results/parallel_score/AFpigVsAFwilAndAFhofVsAFori_snps_chr{chrom}_parallel_score.tsv.gz",
+        pair2_snps = "results/parallel_score/AFpigVsAFadrAndAFhofVsAFori_snps_chr{chrom}_parallel_score.tsv.gz",
+        pair1_indels ="results/parallel_score/AFpigVsAFwilAndAFhofVsAFori_indels_chr{chrom}_parallel_score.tsv.gz",
+        pair2_indels = "results/parallel_score/AFpigVsAFadrAndAFhofVsAFori_indels_chr{chrom}_parallel_score.tsv.gz",
+    params:
+    run:
+        chr_parscor_snps = pd.read_csv(str(input.snps), sep = "\t", compression='gzip')
+        chr_parscor_snps = chr_parscor_snps.replace('.',np.NaN)
+        chr_parscor_snps["par_score_pair1"] = (chr_parscor_snps["AF_pigra"]-chr_parscor_snps["AF_willdenowi"])*(chr_parscor_snps["AF_hofrichteri"]-chr_parscor_snps["AF_orientalis"])
+        chr_parscor_snps["par_score_pair2"] = (chr_parscor_snps["AF_pigra"]-chr_parscor_snps["AF_adriatica"])*(chr_parscor_snps["AF_hofrichteri"]-chr_parscor_snps["AF_orientalis"])
+
+        chr_parscor_snps_pair1 = chr_parscor_snps[["CHROM","POS","REF","ALT","ANN","par_score_pair1"]]
+        chr_parscor_snps_pair2 = chr_parscor_snps[["CHROM","POS","REF","ALT","ANN","par_score_pair2"]]
+
+        chr_parscor_snps_pair1.to_csv(str(output.pair1_snps), sep="\t", index=False, compression='gzip')#, columns = ["CHROM","POS","REF","ALT","ANN","parallel_score"])
+        chr_parscor_snps_pair2.to_csv(str(output.pair2_snps), sep = "\t", index=False, compression='gzip')#, columns = ["CHROM","POS","REF","ALT","ANN","parallel_score"])
+
+        chr_parscor_indels = pd.read_csv(str(input.indels), sep = "\t", compression='gzip')
+        chr_parscor_indels = chr_parscor_indels.replace('.',np.NaN)
+
+        chr_parscor_indels[['AF_pigra', 'AF_orientalis', 'AF_willdenowi', 'AF_adriatica', 'AF_hofrichteri']] = chr_parscor_indels[['AF_pigra', 'AF_orientalis', 'AF_willdenowi', 'AF_adriatica', 'AF_hofrichteri']].apply(pd.to_numeric)
+        chr_parscor_indels["par_score_pair1"] = (chr_parscor_indels["AF_pigra"]-chr_parscor_indels["AF_willdenowi"])*(chr_parscor_indels["AF_hofrichteri"]-chr_parscor_indels["AF_orientalis"])
+        chr_parscor_indels["par_score_pair2"] = (chr_parscor_indels["AF_pigra"]-chr_parscor_indels["AF_adriatica"])*(chr_parscor_indels["AF_hofrichteri"]-chr_parscor_indels["AF_orientalis"])
+
+        chr_parscor_indels_pair1 = chr_parscor_indels[["CHROM","POS","REF","ALT","ANN","par_score_pair1"]]
+        chr_parscor_indels_pair2 = chr_parscor_indels[["CHROM","POS","REF","ALT","ANN","par_score_pair2"]]
+
+        chr_parscor_indels_pair1.to_csv(str(output.pair1_indels), sep="\t", index=False, compression='gzip')#, columns = ["CHROM","POS","REF","ALT","ANN","parallel_score"])
+        chr_parscor_indels_pair2.to_csv(str(output.pair2_indels), sep = "\t", index=False, compression='gzip')#, columns = ["CHROM","POS","REF","ALT","ANN","parallel_score"])
+
+
+
+rule merge_parallel_score_results_and_plot:
+    input:
+        pair1_snps = expand("results/parallel_score/single_files/AFpigVsAFwilAndAFhofVsAFori_snps_chr{chrom}_parallel_score.tsv.gz", chrom = CHROMOSOMES),
+        pair2_snps = expand("results/parallel_score/single_files/AFpigVsAFadrAndAFhofVsAFori_snps_chr{chrom}_parallel_score.tsv.gz", chrom = CHROMOSOMES),
+        pair1_indels = expand("results/parallel_score/single_files/AFpigVsAFwilAndAFhofVsAFori_indels_chr{chrom}_parallel_score.tsv.gz", chrom = CHROMOSOMES),
+        pair2_indels = expand("results/parallel_score/single_files/AFpigVsAFadrAndAFhofVsAFori_indels_chr{chrom}_parallel_score.tsv.gz", chrom = CHROMOSOMES)
+    output:
+        pair1 = "results/parallel_score/AFpigVsAFwilAndAFhofVsAFori_parallel_score.tsv.gz",
+        pair2 = "results/parallel_score/AFpigVsAFadrAndAFhofVsAFori_parallel_score.tsv.gz"
+    run:
+        df_pair1 = pd.DataFrame(columns = ["CHROM","POS","REF","ALT","ANN","type","par_score_pair1"]) # ,"AF_willdenowi","AF_orientalis","AF_hofrichteri"])
+        df_pair2 = pd.DataFrame(columns = ["CHROM","POS","REF","ALT","ANN","type", "par_score_pair2"]) #,"AF_willdenowi","AF_orientalis","AF_hofrichteri"])
+
+        for i in CHROMOSOMES:
+            fh_pair1_indels = "results/parallel_score/single_files/AFpigVsAFwilAndAFhofVsAFori_indels_chr{}_parallel_score.tsv.gz".format(i)
+            fh_pair1_snps = "results/parallel_score/single_files/AFpigVsAFwilAndAFhofVsAFori_snps_chr{}_parallel_score.tsv.gz".format(i)
+            fh_pair2_indels = "results/parallel_score/single_files/AFpigVsAFadrAndAFhofVsAFori_indels_chr{}_parallel_score.tsv.gz".format(i)
+            fh_pair2_snps = "results/parallel_score/single_files/AFpigVsAFadrAndAFhofVsAFori_snps_chr{}_parallel_score.tsv.gz".format(i)
+
+
+            fh_pair1_ind = pd.read_csv(fh_pair1_indels, sep = "\t", compression='gzip')
+            fh_pair1_ind["type"] = "indel"
+            df_pair1 = df_pair1.append(fh_pair1_ind)
+            fh_pair1_snp = pd.read_csv(fh_pair1_snps, sep = "\t", compression='gzip')
+            fh_pair1_snp["type"] = "snp"
+            df_pair1 = df_pair1.append(fh_pair1_snp)
+
+            fh_pair2_ind = pd.read_csv(fh_pair2_indels, sep = "\t", compression='gzip')
+            fh_pair2_ind["type"] = "indel"
+            df_pair2 = df_pair2.append(fh_pair2_ind)
+            fh_pair2_snp = pd.read_csv(fh_pair2_snps, sep = "\t", compression='gzip')
+            fh_pair2_snp["type"] = "snp"
+            df_pair2 = df_pair2.append(fh_pair2_snp)
+         
+        df_pair1.to_csv(str(output.pair1), sep="\t", index=False)
+        df_pair2.to_csv(str(output.pair2), sep = "\t", index=False)
+
+
+

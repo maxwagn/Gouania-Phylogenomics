@@ -1,0 +1,100 @@
+path_to_vcfs = "/scratch/antwerpen/grp/asvardal/projects/clingfishes/projects/GouaniaPhylogenomics/snakemake/VariantCalling/results/VariantCalling/202103GouaniaGenomics_GCF_900634775.1_fGouWil2.1/phasing_tif1_sft1"
+path_to_indel_bcfs = "/scratch/antwerpen/grp/asvardal/projects/clingfishes/projects/GouaniaPhylogenomics/snakemake/VariantCalling/results/VariantCalling/202103GouaniaGenomics_GCF_900634775.1_fGouWil2.1/bcf_filter_tif1_sft1"
+
+
+CHROMOSOMES = [str(i) for i in range(1,25) if i not in [23] ]
+reference = "fGouWil2.1.99"
+VCF_TYPE = ["variants", "all_sites"]
+
+rule all:
+    input:
+        expand("annotation/indels/all_sites.tif1.sft1.pass.indels.biallelic.chr{chrom}.annSNPEFf.vcf.gz", chrom = CHROMOSOMES)
+        #expand("annotation/{vcf_type}/all_sites.tif1.sft1.{vcf_type}.whatshap.shapeit4.annotate.pass.snps.biallelic.chr{chrom}.annSNPEFF.vcf.gz", chrom = CHROMOSOMES, vcf_type = VCF_TYPE[0])
+
+
+rule snpEff_new:
+    input:
+        f"{path_to_vcfs}/all_sites.tif1.sft1.{{vcf_type}}.whatshap.shapeit4.annotate.pass.snps.biallelic.chr{{chrom}}.vcf.gz"
+    output:
+        "annotation/{vcf_type}/all_sites.tif1.sft1.{vcf_type}.whatshap.shapeit4.annotate.pass.snps.biallelic.chr{chrom}.annSNPEFF.vcf.gz"
+    params: 
+        db = "fGouWil2.1.99",
+        #workdr = "annotation/{vcf_type}/chr{chrom}",
+        prefix = "annotation/{vcf_type}/all_sites.tif1.sft1.{vcf_type}.whatshap.shapeit4.annotate.pass.snps.biallelic.chr{chrom}.annSNPEFF.html",
+        outfile_tmp = "annotation/{vcf_type}/all_sites.tif1.sft1.{vcf_type}.whatshap.shapeit4.annotate.pass.snps.biallelic.chr{chrom}.annSNPEFF.vcf.tmp"
+    shell:
+        """
+        java -jar snpEff/snpEff.jar -v {params.db} -stats {params.prefix} {input} > {params.outfile_tmp}
+        bcftools view -I {params.outfile_tmp} -O z -o {output}
+        bcftools index -f {output};
+        bcftools index --tbi -f {output}
+        rm -rf {params.outfile_tmp}
+        """
+
+rule snpEff_indels:
+    input:
+        f"{path_to_indel_bcfs}/all_sites.tif1.sft1.pass.indels.biallelic.{{chrom}}.bcf"
+        #f"{path_to_vcfs}/all_sites.tif1.sft1.{{vcf_type}}.whatshap.shapeit4.annotate.pass.snps.biallelic.chr{{chrom}}.vcf.gz"
+    output:
+        "annotation/indels/all_sites.tif1.sft1.pass.indels.biallelic.chr{chrom}.annSNPEFf.vcf.gz"
+        #"annotation/{vcf_type}/all_sites.tif1.sft1.{vcf_type}.whatshap.shapeit4.annotate.pass.snps.biallelic.chr{chrom}.annSNPEFF.vcf.gz"
+    params:
+        db = "fGouWil2.1.99",
+        #workdr = "annotation/{vcf_type}/chr{chrom}",
+        tmp_input = "annotation/indels/all_sites.tif1.sft1.pass.indels.biallelic.{chrom}.vcf",
+        prefix = "annotation/indels/all_sites.tif1.sft1.pass.indels.biallelic.chr{chrom}.annSNPEFf.html",
+        outfile_tmp = "annotation/indels/all_sites.tif1.sft1.pass.indels.biallelic.chr{chrom}.annSNPEFf.vcf.tmp"
+        #prefix = "annotation/{vcf_type}/all_sites.tif1.sft1.{vcf_type}.whatshap.shapeit4.annotate.pass.snps.biallelic.chr{chrom}.annSNPEFF.html",
+        #outfile_tmp = "annotation/{vcf_type}/all_sites.tif1.sft1.{vcf_type}.whatshap.shapeit4.annotate.pass.snps.biallelic.chr{chrom}.annSNPEFF.vcf.tmp"
+    shell:
+        """
+        bcftools view {input} > {params.tmp_input} 
+        java -jar snpEff/snpEff.jar ann -v {params.db} -stats {params.prefix} {params.tmp_input} > {params.outfile_tmp}
+        bcftools view -I {params.outfile_tmp} -O z -o {output}
+        bcftools index -f {output}
+        bcftools index --tbi -f {output}
+        rm -rf {params.outfile_tmp}
+        rm -rf {params.tmp_input}
+        """
+
+
+        #        """
+        #cd {params.workdr}
+        #./../../../snpEff/exec/snpeff -v {params.db} -s {params.prefix} -csvStats {input} > {params.outfile}
+        #cd ../../../
+        #touch {output}
+        #"""
+
+
+
+
+#rule snpEff:
+#    input:
+#        f"{path_to_vcfs}/all_sites.tif1.sft1.{{vcf_type}}.whatshap.shapeit4.annotate.pass.snps.biallelic.chr{{chrom}}.vcf.gz"
+#    output:
+#        "annotation/{vcf_type}/snEff_chr{chrom}/all_sites.tif1.sft1.{vcf_type}.whatshap.shapeit4.annotate.pass.snps.biallelic.chr{chrom}.annSNPEFF.vcf.done"
+#        #"annotation/snEff_chr{CHROM}/all_sites.tif1.sft1.variants.whatshap.shapeit4.annotate.chr{CHROM}.annSNPEFF.vcf"
+#    params:
+#        db = "fGouWil2.1.99", ### check for database, if you not available create your own
+#        prefix = "{vcf_type}_chr{chrom}",
+#        workdr1 = "annotation/{vcf_type}",
+#        workdr2 = "annotation/{vcf_type}/snEff_chr{chrom}",
+#        outfile = "all_sites.tif1.sft1.{vcf_type}.whatshap.shapeit4.annotate.pass.snps.biallelic.chr{chrom}.annSNPEFF.vcf.done"
+#    resources:
+#        mem_gb = 16
+#    run: 
+#        """
+#        mkdir {params.workdir2} 
+#        echo "mkdir {params.workdir2}" 
+#        cd {params.workdir2} 
+#        ./../../../snpEff/exec/snpeff -v {params.db} -s {params.prefix} -csvStats {input} > {params.outfile}
+#        touch {output}
+#        """
+        
+       # """
+      #  mkdir {params.workdr}
+      #  cd {params.workdr}
+      #  snpEff -Xmx{resources.mem_gb}G -v {params.db} {input} > {params.outfile}
+      #  cd ../../
+      #  """
+#./snpEff/exec/snpeff -v {params.db} {input} > {output}
