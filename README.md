@@ -2,9 +2,8 @@
 In this repository there are all codes used in the Gouania Phylogenomics publication.
 
 
-Raw-input data for the notebook currently still only availbale at my GoogleDrive:
-https://drive.google.com/drive/folders/1wsi11fZCIQIcd3wUmgEmIJil5a5KEv2f?usp=sharing
+Raw-input data and results for the notebook are availbale at:
+https://doi.org/10.6084/m9.figshare.31238869
 
-Same for the results:
-https://drive.google.com/drive/folders/1HxR-PFjPo2YOzh1Bjv-AphvzcCvGM887?usp=sharing
+
 
