@@ -20,6 +20,8 @@ The newly generated DNA barcode sequences, raw sequencing files, and variant cal
   Project accession number: **PRJEB49819**
 - **European Variation Archive (EVA)** (https://www.ebi.ac.uk/eva/)  
   Project accession number: **PRJEB60875**
+- **Draft Genome assemblies**
+  https://doi.org/10.6084/m9.figshare.31238869
 
 Individual accession numbers are listed in the supplementary material of the manuscript.
 
