@@ -2,8 +2,7 @@
 
 This repository contains all scripts and Jupyter notebooks used for the primary and downstream analyses presented in:
 
-**_The genomics of convergent adaptation to intertidal gravel beaches in Mediterranean clingfishes_**  
-Wagner *et al.* (2026), *Genome Biology and Evolution*
+Maximilian Wagner, Philipp Resl, Nadine Klar, Jonathan M Huie, Iliana Bista, Shane McCarthy, Michelle Smith, Richard Durbin, Stephan Koblmüller, Hannes Svardal, **_The genomics of convergentadaptation to intertidal gravel beaches in Mediterranean clingfishes_**, Genome Biology and Evolution, 2026;, evag031, https://doi.org/10.1093/gbe/evag031
 
 The code covers data processing, phylogenomic analyses, and comparative genomic workflows used in the study.
 
